@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/hooks.ts","./src/main.tsx","./src/components/layout.tsx","./src/components/ui.tsx","./src/pages/cost.tsx","./src/pages/measures.tsx","./src/pages/memory.tsx","./src/pages/nutrition.tsx","./src/pages/settings.tsx","./src/pages/today.tsx","./src/pages/trends.tsx","./src/pages/workouts.tsx"],"version":"5.9.3"}
