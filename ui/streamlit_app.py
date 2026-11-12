@@ -1,9 +1,9 @@
-"""Chat interface for the coach. Talks to the FastAPI backend over HTTP, like any other client.
+"""Home: today's metrics, charts and the coach chat. Talks to the FastAPI backend over HTTP.
 
+Chat history lives on the server, so turns from Telegram appear here too.
 Run (with the API already running): streamlit run ui/streamlit_app.py
 """
 
-import os
 from datetime import date
 from statistics import mean
 
@@ -11,7 +11,19 @@ import httpx
 import pandas as pd
 import streamlit as st
 
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000")
+from api_client import (
+    API_URL,
+    api_call,
+    ask_coach,
+    auth_headers,
+    error_detail,
+    fail,
+    fetch_user,
+    fetch_users,
+    refresh_caches,
+    token,
+)
+
 CATEGORIES = ["all", "recovery", "training", "sleep", "nutrition", "safety"]
 GOALS = ["strength", "muscle_gain", "fat_loss", "endurance", "general_fitness"]
 EXAMPLES = [
@@ -21,38 +33,6 @@ EXAMPLES = [
 ]
 
 st.set_page_config(page_title="AI Fitness Coach", layout="wide")
-
-
-def auth_headers(token: str) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}"} if token else {}
-
-
-# The token is part of every cache key, so one browser session never sees another's cached data.
-@st.cache_data(ttl=60)
-def fetch_users(token: str) -> list[dict]:
-    response = httpx.get(f"{API_URL}/users", headers=auth_headers(token), timeout=10)
-    response.raise_for_status()
-    return response.json()
-
-
-@st.cache_data(ttl=60)
-def fetch_user(user_id: str, token: str) -> dict:
-    response = httpx.get(f"{API_URL}/users/{user_id}", headers=auth_headers(token), timeout=10)
-    response.raise_for_status()
-    return response.json()
-
-
-def ask_coach(user_id: str, question: str, category: str) -> dict:
-    payload = {"user_id": user_id, "question": question}
-    if category != "all":
-        payload["category"] = category
-    response = httpx.post(f"{API_URL}/ask", json=payload, headers=auth_headers(token()), timeout=60)
-    response.raise_for_status()
-    return response.json()
-
-
-def token() -> str:
-    return st.session_state.get("token", "")
 
 
 def sign_in_form(failed: bool) -> None:
@@ -66,21 +46,13 @@ def sign_in_form(failed: bool) -> None:
             st.rerun()
 
 
-def error_detail(response: httpx.Response) -> str:
-    detail = response.json().get("detail")
-    if isinstance(detail, list):  # FastAPI validation errors
-        return "; ".join(f"{'.'.join(map(str, e['loc'][1:]))}: {e['msg']}" for e in detail)
-    return str(detail)
-
-
 def save(path: str, payload: dict, success: str) -> None:
     """PUT to the API; on success refresh cached data and rerun so the page shows the new state."""
-    response = httpx.put(f"{API_URL}{path}", json=payload, headers=auth_headers(token()), timeout=10)
+    response = api_call("PUT", path, json=payload)
     if response.is_error:
-        st.error(f"Not saved ({response.status_code}): {error_detail(response)}")
+        fail(response, "Save")
         return
-    fetch_users.clear()
-    fetch_user.clear()
+    refresh_caches()
     st.session_state["flash"] = success
     st.rerun()
 
@@ -136,10 +108,6 @@ PROVIDER_NAMES = {"google": "Google Health (Fitbit)", "fatsecret": "FatSecret"}
 PROVIDER_DATA = {"google": "HRV, resting heart rate, time asleep", "fatsecret": "calories from your food diary"}
 
 
-def api_call(method: str, path: str, **kwargs) -> httpx.Response:
-    return httpx.request(method, f"{API_URL}{path}", headers=auth_headers(token()), timeout=60, **kwargs)
-
-
 def connections_panel(user_id: str) -> None:
     response = api_call("GET", f"/users/{user_id}/integrations")
     if response.is_error:
@@ -168,7 +136,7 @@ def connections_panel(user_id: str) -> None:
             elif st.button("Connect", key=f"connect_{provider}"):
                 r = api_call("POST", f"/users/{user_id}/integrations/{provider}/connect")
                 if r.is_error:
-                    st.error(f"Could not start connecting ({r.status_code}): {error_detail(r)}")
+                    fail(r, "Start connecting")
                 else:
                     st.session_state[url_key] = r.json()["authorization_url"]
                     st.rerun()
@@ -177,7 +145,7 @@ def connections_panel(user_id: str) -> None:
         with st.spinner("Pulling your data..."):
             r = api_call("POST", f"/users/{user_id}/sync", params={"days": 14})
         if r.is_error:
-            st.error(f"Sync failed ({r.status_code}): {error_detail(r)}")
+            fail(r, "Sync")
             return
         messages = [
             f"{PROVIDER_NAMES[x['provider']]}: " + (x["error"] or f"{x['days_updated']} days updated") for x in r.json()
@@ -238,14 +206,18 @@ with st.sidebar:
     labels = {u["user_id"]: f"{u['name']} ({u['goal'].replace('_', ' ')})" for u in users}
     user_id = st.selectbox("User", list(labels), format_func=labels.get)
     category = st.selectbox("Search protocols in", CATEGORIES)
-    if user_id and st.button("Clear chat"):
-        st.session_state.pop(f"messages_{user_id}", None)
+    if user_id and st.button("Clear chat history"):
+        api_call("DELETE", f"/users/{user_id}/messages")
+        st.rerun()
 
 if user_id is None:
     st.title("AI Fitness Coach")
     st.info("No profiles yet. Create yours to start.")
     profile_form(None)
     st.stop()
+
+# Other pages (Training, Nutrition, Memory, Cost) read the selection from session_state.
+st.session_state["user_id"] = user_id
 
 profile = fetch_user(user_id, token())
 days = sorted(profile["days"], key=lambda d: d["date"])
@@ -301,15 +273,18 @@ else:
     right.bar_chart(chart[["sleep_score"]], height=220)
 
 st.divider()
-messages = st.session_state.setdefault(f"messages_{user_id}", [])
 
-for message in messages:
+# History comes from the server, so Telegram turns show up here too.
+history_response = api_call("GET", f"/users/{user_id}/messages", params={"limit": 50})
+history = history_response.json() if not history_response.is_error else []
+for message in history:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
-        render_sources(message.get("sources", []))
+        if message.get("channel") == "telegram":
+            st.caption("via Telegram")
 
 pending = st.session_state.pop("pending_question", None)
-if not messages and pending is None:
+if not history and pending is None:
     st.caption("Try an example:")
     for col, example in zip(st.columns(len(EXAMPLES)), EXAMPLES):
         if col.button(example, width="stretch"):
@@ -319,20 +294,19 @@ if not messages and pending is None:
 question = st.chat_input("Ask your coach...") or pending
 
 if question:
-    messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
-
     with st.chat_message("assistant"):
+        result = None
         try:
             with st.spinner("Retrieving protocols and thinking..."):
                 result = ask_coach(user_id, question, category)
             answer, sources = result["answer"], result["sources"]
         except httpx.HTTPStatusError as exc:
-            answer, sources = f"The API returned {exc.response.status_code}: {exc.response.json().get('detail')}", []
+            answer, sources = f"The API returned {exc.response.status_code}: {error_detail(exc.response)}", []
         except httpx.HTTPError as exc:
             answer, sources = f"Could not reach the API: {exc}", []
         st.markdown(answer)
         render_sources(sources)
-
-    messages.append({"role": "assistant", "content": answer, "sources": sources})
+        if result and result.get("cached_tokens"):
+            st.caption(f"prompt cache hit: {result['cached_tokens']} tokens read from cache")
