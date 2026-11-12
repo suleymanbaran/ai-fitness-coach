@@ -7,6 +7,7 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
+    host: true, // also listen on the LAN IP so the phone can open the dashboard on the same Wi-Fi
     port: 5173,
     proxy: {
       "/users": "http://localhost:8000",

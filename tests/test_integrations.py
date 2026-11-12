@@ -146,8 +146,50 @@ class FakeGoogle:
                 return httpx.Response(200, json={"rollupDataPoints": [
                     {"civilStartTime": {"date": civil(TODAY)}, "activeEnergyBurned": {"kcalSum": 612.7}},
                 ]})
+            if data_type == "total-calories":
+                return httpx.Response(200, json={"rollupDataPoints": [
+                    {"civilStartTime": {"date": civil(TODAY)}, "totalCalories": {"kcalSum": 2639.4}},
+                ]})
             return httpx.Response(200, json={"rollupDataPoints": []})
-        self.filters.append(request.url.params["filter"])
+        if data_type == "exercise":
+            if self.deny_activity:
+                return httpx.Response(403, json={})
+            return httpx.Response(200, json={"dataPoints": [
+                {  # real-shape treadmill run today: 5.2 km in 27 min, avg HR 152
+                    "name": "users/1/dataTypes/exercise/dataPoints/run-1",
+                    "exercise": {
+                        "interval": {
+                            "startTime": f"{TODAY}T08:38:33Z", "startUtcOffset": "3600s",
+                            "endTime": f"{TODAY}T09:07:22Z", "endUtcOffset": "3600s",
+                        },
+                        "exerciseType": "TREADMILL",
+                        "metricsSummary": {
+                            "caloriesKcal": 283, "distanceMillimeters": 5200000,
+                            "averageHeartRateBeatsPerMinute": "152",
+                        },
+                        "activeDuration": "1620s",
+                    },
+                },
+                {  # strength sessions are not runs
+                    "name": "users/1/dataTypes/exercise/dataPoints/strength-1",
+                    "exercise": {
+                        "interval": {"startTime": f"{TODAY}T14:48:37Z", "startUtcOffset": "3600s"},
+                        "exerciseType": "STRENGTH_TRAINING",
+                        "metricsSummary": {"caloriesKcal": 46},
+                        "activeDuration": "413s",
+                    },
+                },
+                {  # treadmill walk (13+ min/km) must be skipped
+                    "name": "users/1/dataTypes/exercise/dataPoints/walk-1",
+                    "exercise": {
+                        "interval": {"startTime": f"{YESTERDAY}T07:00:00Z", "startUtcOffset": "3600s"},
+                        "exerciseType": "TREADMILL",
+                        "metricsSummary": {"distanceMillimeters": 2148657},
+                        "activeDuration": "1726s",
+                    },
+                },
+            ]})
+        self.filters.append(request.url.params.get("filter", ""))
         if data_type == "daily-heart-rate-variability":
             if "pageToken" not in request.url.params:  # first page, more to come
                 point = {"dailyHeartRateVariability": {"date": civil(TODAY), "averageHeartRateVariabilityMilliseconds": 44.0}}
@@ -244,7 +286,7 @@ def test_google_client_paginates_and_builds_daily_filters():
         TODAY: {
             "hrv_ms": 44.0, "resting_hr_bpm": 62, "sleep_minutes": 330,
             "sleep_stages": {"awake": 6, "light": 152, "deep": 70, "rem": 77},
-            "steps": 8432, "active_kcal": 613,
+            "steps": 8432, "active_kcal": 613, "total_kcal": 2639,
         },
         YESTERDAY: {"hrv_ms": 61.0, "steps": 6210},
     }
@@ -370,11 +412,26 @@ def test_connect_google_then_sync_fills_daily_metrics(connected_app):
     assert connected_app.integrations.cipher.decrypt(account.refresh_token_enc) == "refresh-1"
 
     results = client.post("/users/u1/sync", params={"days": 2}).json()
-    assert results == [{"provider": "google", "days_updated": 2, "error": None, "reconnect": False}]
+    assert results == [
+        {"provider": "google", "days_updated": 2, "error": None, "reconnect": False, "runs_new": 1}
+    ]
+
+    # The treadmill run synced into run_logs; strength and walk-pace sessions did not.
+    from app.data_access.runs import list_runs
+
+    synced = list_runs(db, "u1", days=7)
+    assert [(r.distance_km, r.duration_min, r.avg_hr_bpm, r.source) for r in synced] == [
+        (5.2, 27.0, 152, "google")
+    ]
+    assert synced[0].external_id.endswith("run-1")
+
+    # Re-syncing is idempotent.
+    assert client.post("/users/u1/sync", params={"days": 2}).json()[0]["runs_new"] == 0
+    assert len(list_runs(db, "u1", days=7)) == 1
 
     row = db.query(DailyBiometrics).filter_by(user_id="u1", date=TODAY).one()
     assert (row.hrv_ms, row.resting_hr_bpm, row.sleep_minutes, row.source) == (44.0, 62, 330, "google")
-    assert (row.steps, row.active_kcal) == (8432, 613)
+    assert (row.steps, row.active_kcal, row.total_kcal) == (8432, 613, 2639)
     assert row.sleep_stages == {"awake": 6, "light": 152, "deep": 70, "rem": 77}
 
     # Weight/body-fat samples land in body_measurements and refresh the profile weight.

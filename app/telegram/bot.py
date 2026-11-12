@@ -110,7 +110,7 @@ class CoachBot:
             "/today — latest metrics, intake and how the day compares to baseline\n"
             "/meals — today's food log\n"
             "/workout — today's planned session\n"
-            "/plan [training|nutrition] [brief] — generate and activate a new program\n"
+            "/plan — full weekly plan (training + cardio + nutrition); /plan training|nutrition [brief] for one\n"
             "/review [regenerate] — review the active training program\n"
             "/sync — pull the last 7 days from Fitbit/FatSecret\n"
             "/memory — what I remember about you\n"
@@ -207,8 +207,24 @@ class CoachBot:
         if not await self._authorized(update):
             return
         args = list(context.args or [])
-        kind = args[0] if args and args[0] in ("training", "nutrition") else "training"
-        brief = " ".join(args[1:] if args and args[0] == kind else args) or None
+        kind = args[0] if args and args[0] in ("training", "nutrition") else None
+        rest = args[1:] if kind else args
+        brief = " ".join(rest) or None
+
+        if kind is None:
+            # No kind given: one coherent weekly plan (training + cardio + nutrition), auto-activated.
+            result = await self._call(update, self.api.plan_week, self.user_id, brief)
+            if result is None:
+                return
+            training, nutrition = result["training"], result["nutrition"]
+            await self._reply(update, escape_html(
+                f"Weekly plan ready!\n\n"
+                f"TRAINING — {training['name']} (v{training['version']})\n{training['summary']}\n\n"
+                f"NUTRITION — {nutrition['name']} (v{nutrition['version']})\n{nutrition['summary']}\n\n"
+                "Both are active. If something doesn't fit your week, just tell me and I'll revise the plan."
+            ))
+            return
+
         program = await self._call(update, self.api.generate_program, self.user_id, kind, brief)
         if program is None:
             return

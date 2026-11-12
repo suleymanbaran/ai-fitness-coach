@@ -47,7 +47,8 @@ def test_prompt_splits_stable_prefix_from_volatile_context(fakes):
         "update_profile", "log_measurement", "save_memory", "forget_memory", "log_day",
         "search_food", "get_food_nutrition", "log_meal", "list_meals", "delete_meal",
         "save_meal_template", "use_meal_template", "get_workout_template",
-        "get_today_session", "log_workout", "exercise_history", "adjust_session",
+        "get_today_session", "log_workout", "log_run", "exercise_history", "strength_summary",
+        "adjust_session", "revise_program", "create_weekly_plan",
     }
     assert {"type": "web_search"} in call.kwargs["tools"]
 
@@ -137,9 +138,20 @@ def test_create_profile_and_log_days(fakes):
 
 
 def test_profile_update_keeps_logged_days(fakes):
-    r = fakes.client.put("/users/u1", json={"name": "Ali", "age": 28, "weight_kg": 83, "goal": "muscle_gain"})
+    r = fakes.client.put("/users/u1", json={"name": "Ali", "age": 28, "weight_kg": 83, "height_cm": 178, "goal": "muscle_gain"})
     assert r.json()["goal"] == "muscle_gain"
+    assert r.json()["height_cm"] == 178
     assert len(r.json()["days"]) == 7
+
+
+def test_update_profile_tool_stores_height(fakes):
+    from app.config import Settings
+    from app.rag.tools import build_ask_tools
+
+    _, handlers = build_ask_tools(fakes.db, "u1", Settings(_env_file=None))
+    assert handlers["update_profile"]({"height_cm": 181}) == "profile updated: height_cm=181"
+    assert fakes.client.get("/users/u1").json()["height_cm"] == 181
+    assert handlers["update_profile"]({"height_cm": 30}).startswith("error:")
 
 
 def test_log_day_validation(fakes):

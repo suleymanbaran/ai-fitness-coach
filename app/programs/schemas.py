@@ -24,6 +24,12 @@ class Exercise(BaseModel):
 class SessionDay(BaseModel):
     name: str
     focus: str
+    day_type: str = Field(
+        "strength", description="strength | cardio | mixed | rest"
+    )
+    cardio: str = Field(
+        "", description="cardio prescription when day_type includes cardio, e.g. '30-40 min zone 2 cycle, conversational pace'; empty otherwise"
+    )
     exercises: list[Exercise]
 
 
@@ -47,7 +53,15 @@ class NutritionPlan(BaseModel):
     protein_g: int = Field(..., ge=0, le=600)
     carbs_g: int = Field(..., ge=0, le=1200)
     fat_g: int = Field(..., ge=0, le=600)
-    meals: list[MealTemplate]
+    fiber_g: int = Field(30, ge=0, le=100, description="daily fiber target in grams")
+    sodium_mg: int = Field(
+        2300, ge=500, le=6000,
+        description="daily sodium cap in mg (table salt ≈ sodium × 2.5)",
+    )
+    meals: list[MealTemplate] = Field(
+        default_factory=list,
+        description="leave EMPTY unless the user explicitly asked for meal ideas",
+    )
     guidelines: list[str]
 
 
@@ -63,6 +77,30 @@ class NutritionPlanOutput(BaseModel):
     summary: str = Field(..., max_length=500)
     rationale: str
     plan: NutritionPlan
+
+
+class WeeklyPlanOutput(BaseModel):
+    """One coherent weekly plan: training (incl. cardio) + nutrition, generated together so
+    the energy balance, cardio volume and macro targets agree with each other."""
+
+    training_name: str = Field(..., max_length=120)
+    training_summary: str = Field(..., max_length=500)
+    nutrition_name: str = Field(..., max_length=120)
+    nutrition_summary: str = Field(..., max_length=500)
+    rationale: str
+    training: TrainingPlan
+    nutrition: NutritionPlan
+
+
+class WeeklyPlanIn(BaseModel):
+    brief: str | None = Field(
+        None, max_length=500,
+        examples=["4 days/week, home gym with rack + dumbbells, fat loss while keeping strength"],
+    )
+
+
+class ReviseIn(BaseModel):
+    feedback: str = Field(..., min_length=3, max_length=1000, examples=["Mondays no longer work — move the session to Saturday"])
 
 
 class GenerateProgramIn(BaseModel):
@@ -87,6 +125,7 @@ class LoggedSet(BaseModel):
     reps: int | None = Field(None, ge=0, le=200)
     weight_kg: float | None = Field(None, ge=0, le=1000)
     rpe: float | None = Field(None, ge=1, le=10)
+    rir: int | None = Field(None, ge=0, le=10, description="reps in reserve; RPE = 10 - RIR")
 
 
 class LoggedExercise(BaseModel):
@@ -131,6 +170,7 @@ class ExerciseSetOut(BaseModel):
     reps: int | None = None
     weight_kg: float | None = None
     rpe: float | None = None
+    rir: int | None = Field(None, ge=0, le=10, description="reps in reserve; RPE = 10 - RIR")
 
 
 class ExerciseHistoryRow(BaseModel):
@@ -143,3 +183,21 @@ class ExerciseHistoryRow(BaseModel):
     best_weight_kg: float | None = None
     total_reps: int = 0
     volume_kg: float = 0.0
+    est_1rm_kg: float | None = Field(None, description="Epley estimate from the session's best set: w x (1 + reps/30)")
+
+
+class StrengthWeek(BaseModel):
+    week_start: date
+    sets: int = 0
+    total_reps: int = 0
+    volume_kg: float = 0.0
+    top_e1rm_kg: float | None = None
+
+
+class StrengthOut(BaseModel):
+    exercise: str
+    weekly: list[StrengthWeek]
+    pr_weight_kg: float | None = None
+    pr_reps: int | None = None
+    pr_date: date | None = None
+    best_e1rm_kg: float | None = None

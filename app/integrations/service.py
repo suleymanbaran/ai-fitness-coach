@@ -12,10 +12,11 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.data_access.biometrics import upsert_daily_metrics
 from app.data_access.measurements import upsert_measurement
+from app.data_access.runs import sync_run
 from app.db.models import IntegrationAccount
 from app.integrations.common import IntegrationError, ReauthRequired, TokenCipher
 from app.integrations.fatsecret import FatSecretClient
-from app.integrations.google_health import GoogleHealthClient
+from app.integrations.google_health import GoogleHealthClient, parse_runs
 
 Provider = Literal["google", "fatsecret"]
 PROVIDERS: tuple[Provider, ...] = ("google", "fatsecret")
@@ -141,6 +142,7 @@ class SyncResult:
     days_updated: int
     error: str | None = None
     reconnect: bool = False
+    runs_new: int = 0
 
 
 def sync_user(db: Session, integrations: Integrations, user_id: str, days: int) -> list[SyncResult]:
@@ -160,9 +162,12 @@ def sync_user(db: Session, integrations: Integrations, user_id: str, days: int) 
                 upsert_daily_metrics(db, user_id, day, source=account.provider, **values)
             for day, values in measurements.items():
                 upsert_measurement(db, user_id, day, source=account.provider, **values)
+            runs_new = _fetch_runs(db, account, integrations, user_id, start, end)
             account.last_synced_at = datetime.now(UTC)
             account.last_error = None
-            results.append(SyncResult(account.provider, len(set(metrics) | set(measurements))))
+            results.append(
+                SyncResult(account.provider, len(set(metrics) | set(measurements)), runs_new=runs_new)
+            )
         except IntegrationError as exc:
             account.last_error = str(exc)[:300]
             results.append(SyncResult(account.provider, 0, str(exc), reconnect=isinstance(exc, ReauthRequired)))
@@ -186,6 +191,25 @@ def _fetch_measurements(
     if account.provider != "google":
         return {}
     return integrations.google.fetch_measurements(_google_access_token(account, integrations), start, end)
+
+
+def _fetch_runs(
+    db: Session, account: IntegrationAccount, integrations: Integrations, user_id: str, start: date, end: date
+) -> int:
+    """Fitbit-tracked runs into run_logs (idempotent via the dataPoint name). New count returned."""
+    if account.provider != "google":
+        return 0
+    try:
+        exercises = integrations.google.fetch_exercises(_google_access_token(account, integrations), start, end)
+    except IntegrationError as exc:
+        if "denied access" in str(exc):
+            return 0  # older connections may lack the activity scope; metrics sync must not fail
+        raise
+    new = 0
+    for run in parse_runs(exercises):
+        if sync_run(db, user_id, source="google", **run):
+            new += 1
+    return new
 
 
 def _google_access_token(account: IntegrationAccount, integrations: Integrations) -> str:

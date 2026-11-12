@@ -19,6 +19,7 @@ class DailyMetrics(BaseModel):
     calories_kcal: int | None = None
     steps: int | None = None
     active_kcal: int | None = None
+    total_kcal: int | None = None
     sleep_stages: dict | None = None  # {"deep": min, "rem": min, "light": min, "awake": min}
     # Averages over the previous BASELINE_DAYS days, excluding this day. Computed in SQL.
     hrv_baseline_ms: float | None = None
@@ -33,6 +34,7 @@ class UserProfile(BaseModel):
     name: str
     age: int | None = None
     weight_kg: float | None = None
+    height_cm: float | None = None
     goal: str
     days: list[DailyMetrics]
 
@@ -53,6 +55,7 @@ def get_user_days(db: Session, user_id: str, limit: int = HISTORY_DAYS) -> list[
             DailyBiometrics.calories_kcal,
             DailyBiometrics.steps,
             DailyBiometrics.active_kcal,
+            DailyBiometrics.total_kcal,
             DailyBiometrics.sleep_stages,
             _rolling_avg(DailyBiometrics.hrv_ms).label("hrv_baseline_ms"),
             _rolling_avg(DailyBiometrics.sleep_score).label("sleep_baseline"),
@@ -76,16 +79,18 @@ def get_user(db: Session, user_id: str) -> UserProfile | None:
         name=user.name,
         age=user.age,
         weight_kg=user.weight_kg,
+        height_cm=user.height_cm,
         goal=user.goal,
         days=get_user_days(db, user_id),
     )
 
 
 def upsert_user(
-    db: Session, user_id: str, name: str, age: int | None, weight_kg: float | None, goal: str
+    db: Session, user_id: str, name: str, age: int | None, weight_kg: float | None, goal: str,
+    height_cm: float | None = None,
 ) -> None:
     user = db.get(User, user_id) or User(id=user_id)
-    user.name, user.age, user.weight_kg, user.goal = name, age, weight_kg, goal
+    user.name, user.age, user.weight_kg, user.goal, user.height_cm = name, age, weight_kg, goal, height_cm
     db.add(user)
 
 

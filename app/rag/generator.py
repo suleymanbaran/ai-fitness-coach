@@ -15,6 +15,7 @@ they save, so `complete` simply omits the breakpoint for short prefixes.
 
 import json
 import logging
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -22,6 +23,13 @@ from typing import Literal
 from openai import OpenAI
 
 logger = logging.getLogger("fitness_coach")
+
+# GPT-6 models occasionally leak inline citation markers ("citeturn0") into the text.
+_CITATION_ARTIFACT = re.compile(r"\s*citeturn\d+\s*")
+
+
+def _clean(text: str) -> str:
+    return _CITATION_ARTIFACT.sub(" ", text).strip()
 
 # Characters-per-token heuristic for the cacheability gate; no tokenizer dependency.
 CHARS_PER_TOKEN = 4
@@ -84,6 +92,7 @@ class CoachClient:
         ttl_session: str = "30m",
         min_cacheable_tokens: int = 1024,
         max_tool_iterations: int = 6,
+        plan_timeout_seconds: float = 180.0,
     ) -> None:
         self.openai = openai
         self.models: dict[Tier, str] = {"fast": fast_model, "plan": plan_model}
@@ -92,6 +101,8 @@ class CoachClient:
         self.ttl_session = ttl_session
         self.min_cacheable_tokens = min_cacheable_tokens
         self.max_tool_iterations = max_tool_iterations
+        # Plan-tier generations are long structured outputs; they need a longer leash than chat.
+        self.plan_timeout_seconds = plan_timeout_seconds
 
     def complete(
         self,
@@ -113,6 +124,8 @@ class CoachClient:
             "model": model,
             "reasoning": {"effort": effort},
         }
+        if tier == "plan":
+            kwargs["timeout"] = self.plan_timeout_seconds
         if self.enable_caching:
             kwargs["prompt_cache_options"] = {"mode": "implicit", "ttl": self.ttl_session}
         if cache_key:
@@ -131,7 +144,7 @@ class CoachClient:
             total = _add_usage(total, _usage(model, response.usage))
             calls = [item for item in response.output if getattr(item, "type", None) == "function_call"]
             if not calls:
-                return LLMReply(text=response.output_text or "", usage=total)
+                return LLMReply(text=_clean(response.output_text or ""), usage=total)
             # Replay everything the model produced (function calls, web-search calls, reasoning)
             # plus our tool outputs; the growing prefix stays cache-friendly. Built-in tools like
             # web_search run inside OpenAI and never need an output item from us.
@@ -145,7 +158,7 @@ class CoachClient:
         kwargs.pop("tool_choice", None)
         response = self.openai.responses.create(input=items, **kwargs)
         total = _add_usage(total, _usage(model, response.usage))
-        return LLMReply(text=response.output_text or "", usage=total)
+        return LLMReply(text=_clean(response.output_text or ""), usage=total)
 
     def _run_tool(self, handlers: dict[str, Callable[[dict], str]] | None, call) -> str:
         handler = (handlers or {}).get(call.name)

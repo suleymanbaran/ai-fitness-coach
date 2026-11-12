@@ -22,7 +22,7 @@ function MemoryRow({ userId, memory, onChanged }: { userId: string; memory: Memo
   return (
     <div className="flex items-start gap-3 py-3">
       <div className="w-44 shrink-0">
-        <div className="font-mono text-xs text-zinc-300">
+        <div className="font-mono text-xs text-cloud">
           {memory.kind}/{memory.key}
         </div>
         <div className="mt-1 flex gap-1.5">
@@ -39,7 +39,7 @@ function MemoryRow({ userId, memory, onChanged }: { userId: string; memory: Memo
       <button
         title={memory.pinned ? "Unpin" : "Pin (never auto-evicted)"}
         onClick={() => save({ pinned: !memory.pinned })}
-        className={`mt-1.5 ${memory.pinned ? "text-amber-400" : "text-zinc-600 hover:text-zinc-300"}`}
+        className={`mt-1.5 ${memory.pinned ? "text-amber" : "text-ash hover:text-cloud"}`}
       >
         <Pin className="h-4 w-4" />
       </button>
@@ -49,7 +49,7 @@ function MemoryRow({ userId, memory, onChanged }: { userId: string; memory: Memo
           await api.deleteMemory(userId, memory.kind, memory.key);
           onChanged();
         }}
-        className="mt-1.5 text-zinc-600 transition-colors hover:text-red-400"
+        className="mt-1.5 text-ash transition-colors hover:text-ember"
       >
         <Trash2 className="h-4 w-4" />
       </button>
@@ -96,7 +96,7 @@ export default function MemoryPage({ userId }: { userId: string }) {
         {memories.error ? (
           <ErrorNote error={memories.error} />
         ) : memories.data && memories.data.length ? (
-          <div className="divide-y divide-zinc-800/60">
+          <div className="divide-y divide-edge">
             {memories.data.map((memory) => (
               <MemoryRow key={memory.id} userId={userId} memory={memory} onChanged={memories.reload} />
             ))}
@@ -120,15 +120,15 @@ export default function MemoryPage({ userId }: { userId: string }) {
             <Input required placeholder="Value — one short sentence" value={form.value} onChange={(e) => setForm({ ...form, value: e.target.value })} />
           </div>
           <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2 text-sm text-zinc-400">
-              <input type="checkbox" checked={form.pinned} onChange={(e) => setForm({ ...form, pinned: e.target.checked })} className="accent-lime-400" />
+            <label className="flex items-center gap-2 text-sm text-mist">
+              <input type="checkbox" checked={form.pinned} onChange={(e) => setForm({ ...form, pinned: e.target.checked })} className="accent-lime" />
               Pinned
             </label>
             <Button type="submit" variant="primary" disabled={busy}>
               {busy ? "Saving..." : "Save memory"}
             </Button>
           </div>
-          {error && <p className="text-sm text-red-400">{error}</p>}
+          {error && <p className="text-sm text-ember">{error}</p>}
         </form>
       </Card>
     </div>

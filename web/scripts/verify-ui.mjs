@@ -1,5 +1,7 @@
 // Headless verification of the React dashboard against the live API.
 // Usage: node scripts/verify-ui.mjs
+// NOTE: --disable-gpu is required on this machine; without it headless Chrome
+// rasterizes some pages as blank white images.
 import { chromium } from "playwright-core";
 
 const CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
@@ -9,7 +11,7 @@ const SHOTS = "/tmp/coach-ui-shots";
 import { mkdirSync } from "node:fs";
 mkdirSync(SHOTS, { recursive: true });
 
-const browser = await chromium.launch({ executablePath: CHROME, headless: true });
+const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ["--disable-gpu"] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 const consoleErrors = [];
@@ -34,10 +36,13 @@ async function check(name, path, expectations) {
   results.push({ page: name, path, found, shot });
 }
 
-await check("today", "/", ["Hello,", "Energy", "Today's session", "HRV"]);
-await check("workouts", "/workouts", ["Exercise progression", "Bench press", "Top weight", "Log a workout"]);
-await check("trends", "/trends", ["Weight & body fat", "HRV & resting heart rate", "Calorie intake"]);
-await check("nutrition", "/nutrition", ["Meals", "Add meal", "Intake (14 days)"]);
+await check("today", "/", ["Today", "Energy", "Total burn", "Today's session", "HRV"]);
+await check("workouts", "/workouts", ["Strength progression", "Bench press", "Top weight", "Log a workout"]);
+await check("trends", "/trends", ["Energy balance", "Weight & body fat", "HRV & resting heart rate", "Calorie intake"]);
+await check("plan", "/plan", ["Weekly plan", "Planning happens on Telegram", "Revise it"]);
+await check("nutrition", "/nutrition", ["Meals", "Add meal", "Compute nutrition", "Intake (14 days)", "Nutrition plan"]);
+await check("cardio", "/cardio", ["Cardio capacity", "Pace and heart rate", "Log a run", "Run history"]);
+await check("calendar", "/calendar", ["Calendar", "workout or run logged", "Steps", "Nutrition (taken / target)"]);
 await check("measures", "/measures", ["Body measures", "Add measurement", "History"]);
 await check("memory", "/memory", ["Coach memory", "Add memory"]);
 await check("cost", "/cost", ["Cache hit rate", "gpt-6-luna", "By model and purpose"]);

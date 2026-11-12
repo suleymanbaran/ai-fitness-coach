@@ -157,6 +157,13 @@ class FakeAPI:
         self._record("generate_program", user_id, kind, brief)
         return self.program_result
 
+    def plan_week(self, user_id, brief=None):
+        self._record("plan_week", user_id, brief)
+        return {
+            "training": self.program_result,
+            "nutrition": {**self.program_result, "kind": "nutrition", "name": "Balanced 2400", "version": 2},
+        }
+
     def activate_program(self, user_id, program_id):
         self._record("activate_program", user_id, program_id)
         return self.program_result
@@ -266,6 +273,26 @@ def test_plan_generates_and_activates():
     assert api.calls[0] == ("generate_program", ("me", "training", "home gym"), {})
     assert api.calls[1][0] == "activate_program"
     assert "4-Day Strength (v3)" in message.replies[0]
+
+
+def test_plan_without_kind_creates_unified_weekly_plan():
+    api = FakeAPI()
+    bot = CoachBot(api, "me", allowed_chat_id=42)
+    update, message = make_update()
+
+    run(bot.cmd_plan(update, SimpleNamespace(args=[])))
+
+    assert api.calls[0] == ("plan_week", ("me", None), {})
+    reply = message.replies[0]
+    assert "Weekly plan ready" in reply
+    assert "4-Day Strength" in reply and "Balanced 2400" in reply
+
+    # A brief without a kind still goes to the weekly flow.
+    api2 = FakeAPI()
+    bot2 = CoachBot(api2, "me", allowed_chat_id=42)
+    update2, _ = make_update()
+    run(bot2.cmd_plan(update2, SimpleNamespace(args=["fat", "loss"])))
+    assert api2.calls[0] == ("plan_week", ("me", "fat loss"), {})
 
 
 def test_review_with_regenerate():

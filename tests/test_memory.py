@@ -154,7 +154,8 @@ def test_ask_tools_log_days_and_memories(fakes):
         "update_profile", "log_measurement", "save_memory", "forget_memory", "log_day",
         "search_food", "get_food_nutrition", "log_meal", "list_meals", "delete_meal",
         "save_meal_template", "use_meal_template", "get_workout_template",
-        "get_today_session", "log_workout", "exercise_history", "adjust_session",
+        "get_today_session", "log_workout", "log_run", "exercise_history", "strength_summary",
+        "adjust_session", "revise_program", "create_weekly_plan",
     }
     assert {"type": "web_search"} in tools
 

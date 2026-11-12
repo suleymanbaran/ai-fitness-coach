@@ -236,5 +236,11 @@ def test_missing_usage_details_defaults_to_zero():
     assert reply.usage.cached_tokens == 0
 
 
+def test_citation_artifacts_are_stripped():
+    client = make_client(text_response(text="Plan güncellendi. citeturn0 Harika."))
+    reply = coach(client).complete("stable", [], "x")
+    assert reply.text == "Plan güncellendi. Harika."
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-q"])

@@ -1,17 +1,17 @@
 import { FormEvent, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { BookmarkPlus, Trash2, Zap } from "lucide-react";
-import { api, MealTemplate, MealTemplateItem } from "../api";
+import { BookmarkPlus, MessageCircle, Plus, Trash2, X, Zap } from "lucide-react";
+import { api, MealTemplate, MealTemplateItem, ResolvedItem } from "../api";
 import { useFetch, todayISO } from "../hooks";
 import { Badge, Button, Card, Empty, ErrorNote, Input, PageHeader, Select, Spinner, Stat } from "../components/ui";
 
-const AXES = { stroke: "#52525b", fontSize: 11, tickLine: false, axisLine: false } as const;
+const AXES = { stroke: "#6b7580", fontSize: 11, tickLine: false, axisLine: false } as const;
 const TOOLTIP = {
-  contentStyle: { background: "#18181b", border: "1px solid #3f3f46", borderRadius: 12, fontSize: 12 },
-  labelStyle: { color: "#a1a1aa" },
+  contentStyle: { background: "#161c24", border: "1px solid #2c3540", borderRadius: 12, fontSize: 12 },
+  labelStyle: { color: "#a7b1bd" },
 } as const;
 
-const EMPTY_ITEM = { description: "", servings: 1, kcal: "", protein_g: "", carbs_g: "", fat_g: "", fiber_g: "" };
+const EMPTY_ITEM = { name: "", grams: "100", kcal: "", protein_g: "", carbs_g: "", fat_g: "", fiber_g: "" };
 type ItemForm = typeof EMPTY_ITEM;
 
 function TemplateEditor({
@@ -27,36 +27,87 @@ function TemplateEditor({
   const [meal, setMeal] = useState(existing?.meal ?? "breakfast");
   const [items, setItems] = useState<ItemForm[]>(
     existing
-      ? existing.items.map((i) => ({
-          description: i.description,
-          servings: i.servings,
-          kcal: String(i.kcal),
-          protein_g: i.protein_g != null ? String(i.protein_g) : "",
-          carbs_g: i.carbs_g != null ? String(i.carbs_g) : "",
-          fat_g: i.fat_g != null ? String(i.fat_g) : "",
-          fiber_g: i.fiber_g != null ? String(i.fiber_g) : "",
-        }))
+      ? existing.items.map((i) => {
+          const m = i.description.match(GRAMS_RE);
+          return {
+            name: m ? m[2].trim() : i.description,
+            grams: m ? m[1].replace(",", ".") : String(100 * i.servings),
+            kcal: String(Math.round(i.kcal * i.servings)),
+            protein_g: i.protein_g != null ? String(i.protein_g) : "",
+            carbs_g: i.carbs_g != null ? String(i.carbs_g) : "",
+            fat_g: i.fat_g != null ? String(i.fat_g) : "",
+            fiber_g: i.fiber_g != null ? String(i.fiber_g) : "",
+          };
+        })
       : [{ ...EMPTY_ITEM }]
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const total = items.reduce((sum, i) => sum + (Number(i.kcal) || 0) * (Number(i.servings) || 1), 0);
+  const total = items.reduce((sum, i) => sum + (Number(i.kcal) || 0), 0);
 
-  const save = async (e: FormEvent) => {
-    e.preventDefault();
+  const set = (index: number, patch: Partial<ItemForm>) =>
+    setItems(items.map((item, i) => (i === index ? { ...item, ...patch } : item)));
+
+  const computeAll = async () => {
+    const clean = items
+      .map((it, i) => ({ i, name: it.name.trim(), grams: Number(it.grams) }))
+      .filter((x) => x.name && x.grams > 0);
+    if (!clean.length) {
+      setError("Add at least one food with a name and grams.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
-      const payloadItems: MealTemplateItem[] = items.map((i) => ({
-        description: i.description,
-        servings: Number(i.servings) || 1,
-        kcal: Number(i.kcal),
-        protein_g: i.protein_g ? Number(i.protein_g) : null,
-        carbs_g: i.carbs_g ? Number(i.carbs_g) : null,
-        fat_g: i.fat_g ? Number(i.fat_g) : null,
-        fiber_g: i.fiber_g ? Number(i.fiber_g) : null,
-      }));
+      const res = await api.computeMeal(userId, clean.map((x) => ({ name: x.name, grams: x.grams })));
+      setItems((rows) =>
+        rows.map((it, idx) => {
+          const pos = clean.findIndex((c) => c.i === idx);
+          if (pos < 0) return it;
+          const r = res.items[pos];
+          return {
+            ...it,
+            kcal: String(Math.round(r.kcal)),
+            protein_g: String(r.protein_g),
+            carbs_g: String(r.carbs_g),
+            fat_g: String(r.fat_g),
+            fiber_g: String(r.fiber_g),
+          };
+        })
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not compute nutrition");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    if (items.some((i) => i.name.trim() && !i.kcal)) {
+      setError("Run \"Compute nutrition\" (or type kcal yourself) before saving.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const payloadItems: MealTemplateItem[] = items
+        .filter((i) => i.name.trim())
+        .map((i) => ({
+          description: `${Number(i.grams) || 100} g ${i.name.trim()}`,
+          servings: 1,
+          kcal: Number(i.kcal),
+          protein_g: i.protein_g ? Number(i.protein_g) : null,
+          carbs_g: i.carbs_g ? Number(i.carbs_g) : null,
+          fat_g: i.fat_g ? Number(i.fat_g) : null,
+          fiber_g: i.fiber_g ? Number(i.fiber_g) : null,
+        }));
+      if (!payloadItems.length) {
+        setError("Add at least one food.");
+        setBusy(false);
+        return;
+      }
       await api.saveMealTemplate(userId, { name, meal, items: payloadItems });
       onSaved();
     } catch (err) {
@@ -66,13 +117,10 @@ function TemplateEditor({
     }
   };
 
-  const set = (index: number, patch: Partial<ItemForm>) =>
-    setItems(items.map((item, i) => (i === index ? { ...item, ...patch } : item)));
-
   return (
-    <form onSubmit={save} className="space-y-3 border-t border-zinc-800 pt-4">
+    <form onSubmit={save} className="space-y-3 border-t border-edge pt-4">
       <div className="grid gap-3 sm:grid-cols-[1fr_160px]">
-        <Input required placeholder="Template name (Oat breakfast)" value={name} onChange={(e) => setName(e.target.value)} />
+        <Input required placeholder="Template name (Yulaflı kahvaltı)" value={name} onChange={(e) => setName(e.target.value)} />
         <Select value={meal} onChange={(e) => setMeal(e.target.value)}>
           {["breakfast", "lunch", "dinner", "snack"].map((m) => (
             <option key={m} value={m}>
@@ -82,23 +130,23 @@ function TemplateEditor({
         </Select>
       </div>
       {items.map((item, index) => (
-        <div key={index} className="grid grid-cols-2 gap-2 rounded-lg bg-zinc-900 p-2 sm:grid-cols-12">
+        <div key={index} className="grid grid-cols-2 gap-2 rounded-lg bg-night-2 p-2 sm:grid-cols-12">
           <Input
             required
-            className="col-span-2 sm:col-span-4"
-            placeholder="50 g oats"
-            value={item.description}
-            onChange={(e) => set(index, { description: e.target.value })}
+            className="col-span-2 sm:col-span-3"
+            placeholder="Food name (yulaf)"
+            value={item.name}
+            onChange={(e) => set(index, { name: e.target.value })}
           />
-          <Input className="sm:col-span-1" type="number" step="0.5" min={0.25} title="Servings" value={item.servings} onChange={(e) => set(index, { servings: Number(e.target.value) })} />
-          <Input className="sm:col-span-2" type="number" min={0} required placeholder="kcal*" value={item.kcal} onChange={(e) => set(index, { kcal: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" min={1} max={2000} title="Grams" value={item.grams} onChange={(e) => set(index, { grams: e.target.value })} />
+          <Input className="sm:col-span-2" type="number" min={0} placeholder="kcal" title="kcal — computed or typed" value={item.kcal} onChange={(e) => set(index, { kcal: e.target.value })} />
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="P" value={item.protein_g} onChange={(e) => set(index, { protein_g: e.target.value })} />
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="C" value={item.carbs_g} onChange={(e) => set(index, { carbs_g: e.target.value })} />
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="F" value={item.fat_g} onChange={(e) => set(index, { fat_g: e.target.value })} />
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="Lif" value={item.fiber_g} onChange={(e) => set(index, { fiber_g: e.target.value })} />
           <button
             type="button"
-            className="text-zinc-600 hover:text-red-400 sm:col-span-1"
+            className="text-ash hover:text-ember sm:col-span-1"
             onClick={() => setItems(items.filter((_, i) => i !== index))}
             disabled={items.length === 1}
           >
@@ -107,17 +155,24 @@ function TemplateEditor({
         </div>
       ))}
       <div className="flex flex-wrap items-center gap-3">
-        <Button type="button" onClick={() => setItems([...items, { ...EMPTY_ITEM }])}>
-          + Add item
+        <Button type="button" variant="secondary" onClick={() => setItems([...items, { ...EMPTY_ITEM }])}>
+          <Plus className="mr-1 inline h-3.5 w-3.5" /> Add food
         </Button>
-        <span className="text-sm text-zinc-400">
-          Total: <span className="font-semibold text-lime-400">{total} kcal</span>
+        <Button type="button" onClick={computeAll} disabled={busy}>
+          {busy ? "Computing..." : "Compute nutrition"}
+        </Button>
+        <span className="text-sm text-mist">
+          Total: <span className="font-semibold text-lime">{total} kcal</span>
         </span>
         <Button type="submit" variant="primary" disabled={busy} className="ml-auto">
           {busy ? "Saving..." : existing ? "Update template" : "Save template"}
         </Button>
       </div>
-      {error && <p className="text-sm text-red-400">{error}</p>}
+      <p className="text-xs text-ash">
+        Type only names and grams — "Compute nutrition" fills kcal and macros (database or coach
+        estimate); correct any value you think is wrong before saving.
+      </p>
+      {error && <p className="text-sm text-ember">{error}</p>}
     </form>
   );
 }
@@ -149,7 +204,7 @@ function MealTemplates({ userId }: { userId: string }) {
         </Button>
       }
     >
-      {message && <p className="mb-3 text-sm text-lime-400">{message}</p>}
+      {message && <p className="mb-3 text-sm text-lime">{message}</p>}
       {templates.loading ? (
         <Spinner label="" />
       ) : !templates.data?.length ? (
@@ -160,20 +215,20 @@ function MealTemplates({ userId }: { userId: string }) {
       ) : (
         <ul className="space-y-2">
           {templates.data.map((template) => (
-            <li key={template.id} className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3">
+            <li key={template.id} className="rounded-xl border border-edge bg-night-3 p-3">
               <div className="flex flex-wrap items-center gap-2">
-                <Zap className="h-4 w-4 text-lime-400" />
-                <span className="text-sm font-semibold text-zinc-100">{template.name}</span>
+                <Zap className="h-4 w-4 text-lime" />
+                <span className="text-sm font-semibold text-cloud">{template.name}</span>
                 <Badge>{template.meal}</Badge>
-                <span className="text-sm font-semibold text-lime-400">{template.total_kcal} kcal</span>
-                <span className="text-xs text-zinc-500">{template.items.length} items</span>
+                <span className="text-sm font-semibold text-lime">{template.total_kcal} kcal</span>
+                <span className="text-xs text-mist">{template.items.length} items</span>
                 <div className="ml-auto flex items-center gap-2">
                   <input
                     type="number"
                     step="0.25"
                     min="0.25"
                     max="10"
-                    className="w-16 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-200"
+                    className="w-16 rounded border border-edge bg-night-2 px-2 py-1 text-xs text-cloud"
                     value={factors[template.id] ?? "1"}
                     onChange={(e) => setFactors({ ...factors, [template.id]: e.target.value })}
                     title="Portion factor"
@@ -185,7 +240,7 @@ function MealTemplates({ userId }: { userId: string }) {
                     Edit
                   </Button>
                   <button
-                    className="text-zinc-600 hover:text-red-400"
+                    className="text-ash hover:text-ember"
                     onClick={async () => {
                       await api.deleteMealTemplate(userId, template.name);
                       templates.reload();
@@ -195,7 +250,7 @@ function MealTemplates({ userId }: { userId: string }) {
                   </button>
                 </div>
               </div>
-              <p className="mt-1 text-xs text-zinc-500">
+              <p className="mt-1 text-xs text-mist">
                 {template.items.map((i) => `${i.description} (${Math.round(i.kcal * i.servings)} kcal)`).join(" · ")}
               </p>
               {editing === template.id && (
@@ -226,18 +281,246 @@ function MealTemplates({ userId }: { userId: string }) {
   );
 }
 
+const GRAMS_RE = /^\s*([\d.,]+)\s*(?:g|gr|gram)\b\.?\s+(.+)$/i;
+
+/* Name + grams per line; the backend resolves kcal/macros (FatSecret per-100g or one
+   batched LLM estimate). Saved meal templates load into the same rows, editable. */
+function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; onLogged: () => void }) {
+  const [meal, setMeal] = useState("breakfast");
+  const [items, setItems] = useState<{ name: string; grams: string }[]>([{ name: "", grams: "100" }]);
+  const [rows, setRows] = useState<ResolvedItem[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const templates = useFetch(() => api.mealTemplates(userId), [userId]);
+
+  const patch = (index: number, values: Partial<{ name: string; grams: string }>) => {
+    setItems((list) => list.map((r, i) => (i === index ? { ...r, ...values } : r)));
+    setRows(null);
+  };
+
+  const loadTemplate = (t: MealTemplate) => {
+    const loaded = t.items.map((it) => {
+      const m = it.description.match(GRAMS_RE);
+      return m ? { name: m[2].trim(), grams: m[1].replace(",", ".") } : { name: it.description, grams: "100" };
+    });
+    setItems(loaded.length ? loaded : [{ name: "", grams: "100" }]);
+    // Templates already carry nutrition values — show them as pre-computed, editable rows.
+    setRows(
+      t.items.map((it) => {
+        const m = it.description.match(GRAMS_RE);
+        return {
+          name: m ? m[2].trim() : it.description,
+          grams: m ? Number(m[1].replace(",", ".")) : 100,
+          kcal: it.kcal,
+          protein_g: it.protein_g ?? 0,
+          carbs_g: it.carbs_g ?? 0,
+          fat_g: it.fat_g ?? 0,
+          fiber_g: it.fiber_g ?? 0,
+          source: "template" as const,
+        };
+      })
+    );
+    setError("");
+  };
+
+  const clean = items.filter((i) => i.name.trim() && Number(i.grams) > 0);
+
+  const compute = async (): Promise<ResolvedItem[] | null> => {
+    if (!clean.length) {
+      setError("Add at least one food with a name and grams.");
+      return null;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await api.computeMeal(
+        userId,
+        clean.map((i) => ({ name: i.name.trim(), grams: Number(i.grams) }))
+      );
+      setRows(result.items);
+      return result.items;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not compute nutrition");
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const patchRow = (index: number, values: Partial<ResolvedItem>) =>
+    setRows((list) => (list ? list.map((r, i) => (i === index ? { ...r, ...values } : r)) : list));
+
+  const totals = (rows ?? []).reduce(
+    (acc, r) => ({
+      kcal: acc.kcal + r.kcal,
+      protein_g: acc.protein_g + r.protein_g,
+      carbs_g: acc.carbs_g + r.carbs_g,
+      fat_g: acc.fat_g + r.fat_g,
+      fiber_g: acc.fiber_g + r.fiber_g,
+    }),
+    { kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
+  );
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    const finalRows = rows ?? (await compute());
+    if (!finalRows) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.logMeal(userId, {
+        date: day,
+        meal,
+        description: finalRows.map((i) => `${i.grams} g ${i.name}`).join(", "),
+        kcal: Math.round(finalRows.reduce((s, r) => s + r.kcal, 0)),
+        protein_g: finalRows.reduce((s, r) => s + r.protein_g, 0),
+        carbs_g: finalRows.reduce((s, r) => s + r.carbs_g, 0),
+        fat_g: finalRows.reduce((s, r) => s + r.fat_g, 0),
+        fiber_g: finalRows.reduce((s, r) => s + r.fiber_g, 0),
+      });
+      setRows(null);
+      setItems([{ name: "", grams: "100" }]);
+      onLogged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Add meal">
+      <form onSubmit={save} className="space-y-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Select value={meal} onChange={(e) => setMeal(e.target.value)} className="w-36">
+            {["breakfast", "lunch", "dinner", "snack"].map((m) => (
+              <option key={m} value={m}>
+                {m}
+              </option>
+            ))}
+          </Select>
+          {(templates.data ?? []).map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => loadTemplate(t)}
+              className="rounded-full border border-edge bg-night-3 px-3 py-1 text-xs text-mist transition-colors hover:border-lime/50 hover:text-lime"
+            >
+              {t.name} · {t.total_kcal} kcal
+            </button>
+          ))}
+        </div>
+
+        <div className="space-y-2">
+          {items.map((item, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Input
+                placeholder="Food name (yulaf, whey, fıstık ezmesi...)"
+                value={item.name}
+                onChange={(e) => patch(i, { name: e.target.value })}
+                className="flex-1"
+              />
+              <Input
+                type="number"
+                min="1"
+                max="2000"
+                step="1"
+                value={item.grams}
+                onChange={(e) => patch(i, { grams: e.target.value })}
+                className="w-24!"
+                title="Grams"
+              />
+              <span className="text-xs text-ash">g</span>
+              <button
+                type="button"
+                className="text-ash hover:text-ember disabled:opacity-30"
+                disabled={items.length === 1}
+                onClick={() => {
+                  setItems(items.filter((_, j) => j !== i));
+                  setRows(null);
+                }}
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            onClick={() => {
+              setItems([...items, { name: "", grams: "100" }]);
+              setRows(null);
+            }}
+          >
+            <Plus className="mr-1 inline h-3.5 w-3.5" /> Add food
+          </Button>
+          <Button type="button" onClick={compute} disabled={busy || !clean.length}>
+            {busy && !rows ? "Computing..." : "Compute nutrition"}
+          </Button>
+          <Button type="submit" variant="primary" disabled={busy || !clean.length} className="ml-auto">
+            {busy ? "Working..." : "Log meal"}
+          </Button>
+        </div>
+
+        {rows && rows.length > 0 && (
+          <div className="rounded-xl border border-edge bg-night-3 p-3">
+            <ul className="space-y-1.5 text-sm">
+              {rows.map((r, i) => (
+                <li key={i} className="flex flex-wrap items-center gap-2">
+                  <span className="flex min-w-[140px] flex-1 items-center gap-2 text-mist">
+                    {r.grams} g {r.name}
+                    <Badge tone={r.source === "fatsecret" ? "lime" : r.source === "template" ? "zinc" : "amber"}>
+                      {r.source === "fatsecret" ? "db" : r.source === "template" ? "saved" : "est."}
+                    </Badge>
+                  </span>
+                  <input
+                    type="number" step="1" min="0" title="kcal — editable" value={Math.round(r.kcal)}
+                    onChange={(e) => patchRow(i, { kcal: Number(e.target.value) })}
+                    className="w-16 rounded border border-edge bg-night-2 px-1.5 py-0.5 text-right text-xs text-cloud"
+                  />
+                  <span className="text-[10px] text-ash">kcal</span>
+                  {(["protein_g", "carbs_g", "fat_g"] as const).map((key) => (
+                    <span key={key} className="flex items-center gap-1">
+                      <input
+                        type="number" step="0.1" min="0" title={key} value={r[key]}
+                        onChange={(e) => patchRow(i, { [key]: Number(e.target.value) })}
+                        className="w-14 rounded border border-edge bg-night-2 px-1.5 py-0.5 text-right text-xs text-cloud"
+                      />
+                      <span className="text-[10px] text-ash">{key === "protein_g" ? "P" : key === "carbs_g" ? "C" : "F"}</span>
+                    </span>
+                  ))}
+                </li>
+              ))}
+            </ul>
+            <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-edge pt-2 text-sm">
+              <span className="font-grotesk text-lg font-bold text-lime">{Math.round(totals.kcal)} kcal</span>
+              <span className="text-mist">P {totals.protein_g.toFixed(0)} g</span>
+              <span className="text-mist">C {totals.carbs_g.toFixed(0)} g</span>
+              <span className="text-mist">F {totals.fat_g.toFixed(0)} g</span>
+              <span className="text-mist">Fiber {totals.fiber_g.toFixed(0)} g</span>
+              <span className="ml-auto text-xs text-ash">values are editable — correct anything that looks wrong</span>
+            </div>
+          </div>
+        )}
+        {error && <p className="text-sm text-ember">{error}</p>}
+        <p className="text-xs text-ash">
+          Just the name and grams — calories and macros come from the food database or are estimated
+          by the coach. Edit amounts, add or remove foods, then log.
+        </p>
+      </form>
+    </Card>
+  );
+}
+
 export default function Nutrition({ userId }: { userId: string }) {
   const [day, setDay] = useState(todayISO());
   const meals = useFetch(() => api.meals(userId, day), [userId, day]);
   const intake = useFetch(() => api.intake(userId, 14), [userId]);
   const programs = useFetch(() => api.programs(userId, "active"), [userId]);
 
-  const [form, setForm] = useState({ meal: "breakfast", description: "", kcal: "", protein_g: "", carbs_g: "", fat_g: "", fiber_g: "" });
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [planBrief, setPlanBrief] = useState("");
-  const [planBusy, setPlanBusy] = useState(false);
-  const [planError, setPlanError] = useState("");
 
   // Template "Log" buttons notify us so the day's list refreshes.
   useMemo(() => {
@@ -251,6 +534,8 @@ export default function Nutrition({ userId }: { userId: string }) {
 
   const nutritionProgram = (programs.data ?? []).find((p) => p.kind === "nutrition");
   const target = typeof nutritionProgram?.payload?.target_kcal === "number" ? nutritionProgram.payload.target_kcal : null;
+  const fiberTarget = typeof nutritionProgram?.payload?.fiber_g === "number" ? nutritionProgram.payload.fiber_g : null;
+  const sodiumTarget = typeof nutritionProgram?.payload?.sodium_mg === "number" ? nutritionProgram.payload.sodium_mg : null;
 
   const intakeRows = useMemo(() => (intake.data ?? []).map((d) => ({ date: d.date.slice(5), kcal: d.kcal })), [intake.data]);
 
@@ -261,46 +546,6 @@ export default function Nutrition({ userId }: { userId: string }) {
   const dayCarbs = sum("carbs_g");
   const dayFat = sum("fat_g");
   const dayFiber = sum("fiber_g");
-
-  const generatePlan = async () => {
-    setPlanBusy(true);
-    setPlanError("");
-    try {
-      const program = await api.generateProgram(userId, "nutrition", planBrief || undefined);
-      await api.activateProgram(userId, program.id);
-      setPlanBrief("");
-      programs.reload();
-    } catch (err) {
-      setPlanError(err instanceof Error ? err.message : "Generation failed");
-    } finally {
-      setPlanBusy(false);
-    }
-  };
-
-  const submit = async (e: FormEvent) => {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      await api.logMeal(userId, {
-        date: day,
-        meal: form.meal,
-        description: form.description,
-        kcal: Number(form.kcal),
-        protein_g: form.protein_g ? Number(form.protein_g) : null,
-        carbs_g: form.carbs_g ? Number(form.carbs_g) : null,
-        fat_g: form.fat_g ? Number(form.fat_g) : null,
-        fiber_g: form.fiber_g ? Number(form.fiber_g) : null,
-      });
-      setForm({ meal: form.meal, description: "", kcal: "", protein_g: "", carbs_g: "", fat_g: "", fiber_g: "" });
-      meals.reload();
-      intake.reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed");
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const remove = async (mealId: number) => {
     await api.deleteMeal(userId, mealId);
@@ -313,18 +558,31 @@ export default function Nutrition({ userId }: { userId: string }) {
       <PageHeader title="Nutrition" subtitle="Daily totals, meals, templates and your nutrition plan." />
 
       {/* Daily totals for the selected day, with remaining budget when a plan target exists */}
-      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-5">
+      <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-6">
         <Stat
           label={day === todayISO() ? "Calories today" : `Calories ${day.slice(5)}`}
           value={dayTotal.toLocaleString()}
           unit="kcal"
-          delta={target ? `${Math.max(target - dayTotal, 0).toLocaleString()} kcal remaining of ${target.toLocaleString()}` : undefined}
-          deltaGood={null}
+          delta={
+            target
+              ? dayTotal > target
+                ? `${(dayTotal - target).toLocaleString()} kcal over the ${target.toLocaleString()} target`
+                : `${(target - dayTotal).toLocaleString()} kcal remaining of ${target.toLocaleString()}`
+              : undefined
+          }
+          deltaGood={target ? dayTotal <= target : null}
         />
         <Stat label="Protein" value={dayProtein.toFixed(0)} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.protein_g ?? "—"} g` : undefined} deltaGood={null} />
         <Stat label="Carbs" value={dayCarbs.toFixed(0)} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.carbs_g ?? "—"} g` : undefined} deltaGood={null} />
         <Stat label="Fat" value={dayFat.toFixed(0)} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.fat_g ?? "—"} g` : undefined} deltaGood={null} />
-        <Stat label="Fiber" value={dayFiber.toFixed(0)} unit="g" delta="target 25-38 g" deltaGood={dayFiber >= 25} />
+        <Stat label="Fiber" value={dayFiber.toFixed(0)} unit="g" delta={fiberTarget ? `target ${fiberTarget} g` : "target 25-38 g"} deltaGood={dayFiber >= (fiberTarget ?? 25)} />
+        <Stat
+          label="Sodium"
+          value={sodiumTarget ? `≤ ${sodiumTarget.toLocaleString()}` : "—"}
+          unit="mg"
+          delta="daily cap from your plan"
+          deltaGood={null}
+        />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
@@ -333,8 +591,8 @@ export default function Nutrition({ userId }: { userId: string }) {
             title="Meals"
             action={
               <div className="flex items-center gap-3">
-                <span className="text-sm font-semibold text-lime-400">
-                  {dayTotal.toLocaleString()} kcal{dayFiber > 0 && <span className="text-zinc-400"> · {dayFiber.toFixed(0)} g fiber</span>}
+                <span className="text-sm font-semibold text-lime">
+                  {dayTotal.toLocaleString()} kcal{dayFiber > 0 && <span className="text-mist"> · {dayFiber.toFixed(0)} g fiber</span>}
                 </span>
                 <Input type="date" value={day} max={todayISO()} onChange={(e) => setDay(e.target.value)} className="w-auto!" />
               </div>
@@ -343,12 +601,12 @@ export default function Nutrition({ userId }: { userId: string }) {
             {meals.loading ? (
               <Spinner label="" />
             ) : meals.data && meals.data.length > 0 ? (
-              <ul className="divide-y divide-zinc-800">
+              <ul className="divide-y divide-edge">
                 {meals.data.map((m) => (
                   <li key={m.id} className="flex items-center justify-between gap-2 py-2.5">
                     <div className="min-w-0">
-                      <span className="text-sm font-medium text-zinc-200">{m.description}</span>
-                      <div className="mt-0.5 flex items-center gap-2 text-xs text-zinc-500">
+                      <span className="text-sm font-medium text-cloud">{m.description}</span>
+                      <div className="mt-0.5 flex items-center gap-2 text-xs text-mist">
                         <Badge>{m.meal}</Badge>
                         <Badge tone={m.source === "assistant" ? "amber" : m.source === "template" ? "lime" : "zinc"}>{m.source}</Badge>
                         {m.protein_g != null && <span>P {m.protein_g}g</span>}
@@ -358,8 +616,8 @@ export default function Nutrition({ userId }: { userId: string }) {
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-3">
-                      <span className="text-sm font-semibold text-zinc-100">{m.kcal}</span>
-                      <button onClick={() => remove(m.id)} className="text-zinc-600 transition-colors hover:text-red-400">
+                      <span className="text-sm font-semibold text-cloud">{m.kcal}</span>
+                      <button onClick={() => remove(m.id)} className="text-ash transition-colors hover:text-ember">
                         <Trash2 className="h-4 w-4" />
                       </button>
                     </div>
@@ -371,44 +629,14 @@ export default function Nutrition({ userId }: { userId: string }) {
             )}
           </Card>
 
-          <Card title="Add meal">
-            <form onSubmit={submit} className="space-y-3">
-              <div className="grid gap-3 sm:grid-cols-[140px_1fr_110px]">
-                <Select value={form.meal} onChange={(e) => setForm({ ...form, meal: e.target.value })}>
-                  {["breakfast", "lunch", "dinner", "snack"].map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </Select>
-                <Input
-                  required
-                  placeholder="What did you eat? (2 eggs + 1 simit)"
-                  value={form.description}
-                  onChange={(e) => setForm({ ...form, description: e.target.value })}
-                />
-                <Input
-                  required
-                  type="number"
-                  min={0}
-                  max={20000}
-                  placeholder="kcal"
-                  value={form.kcal}
-                  onChange={(e) => setForm({ ...form, kcal: e.target.value })}
-                />
-              </div>
-              <div className="grid gap-3 sm:grid-cols-5">
-                <Input type="number" min={0} step="0.1" placeholder="Protein (g)" value={form.protein_g} onChange={(e) => setForm({ ...form, protein_g: e.target.value })} />
-                <Input type="number" min={0} step="0.1" placeholder="Carbs (g)" value={form.carbs_g} onChange={(e) => setForm({ ...form, carbs_g: e.target.value })} />
-                <Input type="number" min={0} step="0.1" placeholder="Fat (g)" value={form.fat_g} onChange={(e) => setForm({ ...form, fat_g: e.target.value })} />
-                <Input type="number" min={0} step="0.1" placeholder="Fiber (g)" value={form.fiber_g} onChange={(e) => setForm({ ...form, fiber_g: e.target.value })} />
-                <Button type="submit" variant="primary" disabled={busy}>
-                  {busy ? "Saving..." : "Log meal"}
-                </Button>
-              </div>
-              {error && <p className="text-sm text-red-400">{error}</p>}
-            </form>
-          </Card>
+          <AddMealCard
+            userId={userId}
+            day={day}
+            onLogged={() => {
+              meals.reload();
+              intake.reload();
+            }}
+          />
 
           <MealTemplates userId={userId} />
         </div>
@@ -418,10 +646,10 @@ export default function Nutrition({ userId }: { userId: string }) {
             {intakeRows.length ? (
               <ResponsiveContainer width="100%" height={200}>
                 <BarChart data={intakeRows}>
-                  <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
+                  <CartesianGrid stroke="#2c3540" strokeDasharray="3 3" vertical={false} />
                   <XAxis dataKey="date" {...AXES} />
                   <YAxis {...AXES} width={44} />
-                  <Tooltip {...TOOLTIP} cursor={{ fill: "#27272a55" }} />
+                  <Tooltip {...TOOLTIP} cursor={{ fill: "rgba(163,230,53,0.05)" }} />
                   <Bar dataKey="kcal" fill="#a3e635" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -430,66 +658,12 @@ export default function Nutrition({ userId }: { userId: string }) {
             )}
           </Card>
 
-          <Card title="Nutrition plan">
-            {nutritionProgram ? (
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-zinc-100">{nutritionProgram.name}</span>
-                  <Badge tone="lime">v{nutritionProgram.version} · active</Badge>
-                </div>
-                <p className="mt-2 text-sm text-zinc-400">{nutritionProgram.summary}</p>
-                <div className="mt-3 grid grid-cols-4 gap-2 text-center">
-                  {([
-                    ["kcal", target],
-                    ["Protein", nutritionProgram.payload.protein_g],
-                    ["Carbs", nutritionProgram.payload.carbs_g],
-                    ["Fat", nutritionProgram.payload.fat_g],
-                  ] as [string, unknown][]).map(([label, value]) => (
-                    <div key={label} className="rounded-lg bg-zinc-800/60 p-2">
-                      <div className="text-sm font-bold text-zinc-100">{typeof value === "number" ? value : "—"}</div>
-                      <div className="text-[10px] uppercase text-zinc-500">{label}</div>
-                    </div>
-                  ))}
-                </div>
-                {Array.isArray(nutritionProgram.payload.meals) && (nutritionProgram.payload.meals as { name?: string; items?: string; kcal?: number }[]).length > 0 && (
-                  <ul className="mt-3 space-y-1.5">
-                    {(nutritionProgram.payload.meals as { name?: string; items?: string; kcal?: number }[]).map((m, i) => (
-                      <li key={i} className="flex justify-between gap-3 text-sm">
-                        <span className="text-zinc-300">
-                          <span className="font-medium">{m.name}</span>
-                          {m.items && <span className="text-zinc-500"> — {m.items}</span>}
-                        </span>
-                        <span className="shrink-0 text-zinc-400">{m.kcal} kcal</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {Array.isArray(nutritionProgram.payload.guidelines) && (nutritionProgram.payload.guidelines as string[]).length > 0 && (
-                  <ul className="mt-3 list-inside list-disc space-y-1 text-xs text-zinc-500">
-                    {(nutritionProgram.payload.guidelines as string[]).map((g, i) => (
-                      <li key={i}>{g}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
-            ) : (
-              <Empty>No active nutrition plan. Generate one below — the coach designs daily calorie & macro targets and meal ideas from your data.</Empty>
-            )}
-            <div className="mt-4 border-t border-zinc-800 pt-4">
-              <div className="flex gap-2">
-                <Input
-                  placeholder="Brief (optional): fat loss, lunch at work, no dairy..."
-                  value={planBrief}
-                  onChange={(e) => setPlanBrief(e.target.value)}
-                />
-                <Button variant="primary" onClick={generatePlan} disabled={planBusy} className="shrink-0">
-                  {planBusy ? "Designing..." : nutritionProgram ? "Regenerate" : "Generate plan"}
-                </Button>
-              </div>
-              {planError && <p className="mt-2 text-sm text-red-400">{planError}</p>}
-              <p className="mt-2 text-xs text-zinc-600">Uses the plan model (~30 s). New plans activate immediately; old versions stay in history.</p>
-            </div>
-          </Card>
+          <p className="flex items-start gap-2 px-1 text-xs text-ash">
+            <MessageCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan" />
+            {nutritionProgram
+              ? "Targets come from your Telegram plan — numbers only, no menus. Ask the coach \"ne yemeliyim?\" when you want meal ideas."
+              : "No active plan yet. Ask the coach on Telegram (\"bana haftalık plan yap\") and your daily kcal/macro/fiber/salt targets appear up top."}
+          </p>
         </div>
       </div>
       {programs.error && <ErrorNote error={programs.error} />}

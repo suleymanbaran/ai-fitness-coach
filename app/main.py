@@ -63,8 +63,10 @@ from app.rag.extraction import run_memory_extraction
 from app.rag.embeddings import Embedder
 from app.rag.generator import CoachClient
 from app.rag.ingestion import ingest_protocols
-from app.rag.prompt import build_prompt, format_intake, format_templates, format_workouts
-from app.rag.tools import build_ask_tools
+from app.data_access.runs import add_run, delete_run, list_runs
+from app.nutrition import MealItemQuery, resolve_items
+from app.rag.prompt import build_prompt, format_intake, format_runs, format_templates, format_workouts
+from app.rag.tools import PlanContext, build_ask_tools
 from app.rag.vector_store import ProtocolStore, connect_qdrant
 from app.schemas import (
     MEMORY_KEY_PATTERN,
@@ -73,11 +75,16 @@ from app.schemas import (
     AskResponse,
     DayMetricsIn,
     LogFromTemplateIn,
+    MealComputeIn,
+    MealComputeOut,
     MealIn,
     MeasurementIn,
     MemoryIn,
     MemoryKind,
     ProfileIn,
+    ResolvedItemOut,
+    RunIn,
+    RunOut,
     Source,
     UserSummary,
 )
@@ -114,6 +121,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             ttl_stable=settings.cache_ttl_stable,
             ttl_session=settings.cache_ttl_session,
             max_tool_iterations=settings.tool_max_iterations,
+            plan_timeout_seconds=settings.plan_timeout_seconds,
         )
         app.state.store = ProtocolStore(qdrant_client, settings.qdrant_collection)
 
@@ -242,11 +250,15 @@ def ask(
             workouts=format_workouts(
                 list_workouts(db, payload.user_id, since=date.today() - timedelta(days=13))
             ),
+            runs=format_runs(list_runs(db, payload.user_id, days=90)),
             templates=format_templates(
                 list_meal_templates(db, payload.user_id), list_workout_templates(db, payload.user_id)
             ),
         )
-        tools, handlers = build_ask_tools(db, payload.user_id, settings, integrations)
+        tools, handlers = build_ask_tools(
+            db, payload.user_id, settings, integrations,
+            plan_ctx=PlanContext(coach=coach, embedder=embedder, store=store),
+        )
         reply = coach.complete(
             parts.stable,
             history,
@@ -393,6 +405,43 @@ def log_meal(
     return FoodLogOut.model_validate(row, from_attributes=True)
 
 
+@app.post("/users/{user_id}/meals/compute", response_model=MealComputeOut)
+def compute_meal(
+    payload: MealComputeIn,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+    coach: CoachClient = Depends(get_coach),
+    integrations: Integrations = Depends(get_integrations),
+) -> MealComputeOut:
+    """Turn name+grams item lines into kcal/macros: FatSecret per-100g first, one batched
+    LLM estimate for the rest. The Add-meal form calls this so the user never types numbers."""
+    authorize(user_id, current)
+    if db.get(User, user_id) is None:
+        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+    items = [MealItemQuery(name=i.name.strip(), grams=i.grams) for i in payload.items]
+    try:
+        resolved = resolve_items(
+            items,
+            fatsecret=getattr(integrations, "fatsecret", None),
+            coach=coach, db=db, user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except APIError as exc:
+        logger.warning("meal compute LLM call failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Nutrition estimate failed; try again in a moment.") from exc
+    db.commit()  # persist the estimate's llm_calls accounting row, if one was recorded
+    return MealComputeOut(
+        items=[ResolvedItemOut(**vars(r)) for r in resolved],
+        total_kcal=round(sum(r.kcal for r in resolved), 1),
+        total_protein_g=round(sum(r.protein_g for r in resolved), 1),
+        total_carbs_g=round(sum(r.carbs_g for r in resolved), 1),
+        total_fat_g=round(sum(r.fat_g for r in resolved), 1),
+        total_fiber_g=round(sum(r.fiber_g for r in resolved), 1),
+    )
+
+
 @app.get("/users/{user_id}/meals", response_model=list[FoodLogOut])
 def meals(
     day: date | None = Query(None, description="Defaults to today"),
@@ -424,7 +473,7 @@ def remove_meal(
 
 @app.get("/users/{user_id}/intake", response_model=list[DayIntake])
 def intake(
-    days: int = Query(14, ge=1, le=90),
+    days: int = Query(14, ge=1, le=365),
     user_id: str = Path(..., pattern=USER_ID_PATTERN),
     db: Session = Depends(get_db),
     current: str | None = Depends(current_user_id),
@@ -433,6 +482,55 @@ def intake(
     if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
     return intake_window(db, user_id, days)
+
+
+@app.post("/users/{user_id}/runs", response_model=RunOut)
+def log_run(
+    run: RunIn,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+) -> RunOut:
+    authorize(user_id, current)
+    if db.get(User, user_id) is None:
+        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+    day = run.day or date.today()
+    if day > date.today():
+        raise HTTPException(status_code=422, detail="Cannot log a run for a future date")
+    row = add_run(
+        db, user_id, day,
+        distance_km=run.distance_km, duration_min=run.duration_min,
+        avg_hr_bpm=run.avg_hr_bpm, notes=run.notes,
+    )
+    db.commit()
+    return RunOut.model_validate(row, from_attributes=True)
+
+
+@app.get("/users/{user_id}/runs", response_model=list[RunOut])
+def runs(
+    days: int = Query(90, ge=1, le=365),
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+) -> list[RunOut]:
+    authorize(user_id, current)
+    if db.get(User, user_id) is None:
+        raise HTTPException(status_code=404, detail=f"User {user_id} not found")
+    return [RunOut.model_validate(r, from_attributes=True) for r in list_runs(db, user_id, days)]
+
+
+@app.delete("/users/{user_id}/runs/{run_id}", status_code=204)
+def remove_run(
+    run_id: int,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+) -> Response:
+    authorize(user_id, current)
+    if not delete_run(db, user_id, run_id):
+        raise HTTPException(status_code=404, detail="Run not found")
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.get("/users/{user_id}/meal-templates", response_model=list[MealTemplateOut])

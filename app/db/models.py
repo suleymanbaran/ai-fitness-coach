@@ -30,6 +30,7 @@ class User(Base):
     email: Mapped[str | None] = mapped_column(String(320), unique=True)
     age: Mapped[int | None] = mapped_column(Integer)
     weight_kg: Mapped[float | None] = mapped_column(Float)
+    height_cm: Mapped[float | None] = mapped_column(Float)
     goal: Mapped[str] = mapped_column(String(40), default="general_fitness")
     # SHA-256 of the user's API token; the token itself is never stored.
     api_token_hash: Mapped[str | None] = mapped_column(String(64), unique=True)
@@ -59,6 +60,7 @@ class DailyBiometrics(Base):
     calories_kcal: Mapped[int | None] = mapped_column(Integer)  # intake (food)
     steps: Mapped[int | None] = mapped_column(Integer)
     active_kcal: Mapped[int | None] = mapped_column(Integer)  # energy burned by activity
+    total_kcal: Mapped[int | None] = mapped_column(Integer)  # Fitbit total energy expenditure (BMR + activity)
     # Stage minutes of the main sleep, e.g. {"deep": 70, "rem": 77, "light": 152, "awake": 6}.
     sleep_stages: Mapped[dict | None] = mapped_column(JSONB)
     source: Mapped[str] = mapped_column(String(20), default="seed")
@@ -287,5 +289,31 @@ class WorkoutLog(Base):
     session_name: Mapped[str] = mapped_column(String(120))
     exercises: Mapped[list] = mapped_column(JSONB)  # [{name, sets: [{reps?, weight_kg?, rpe?}]}]
     duration_min: Mapped[int | None] = mapped_column(Integer)
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RunLog(Base):
+    """One completed run, for cardiovascular capacity tracking (pace and heart-rate trends).
+    Synced Fitbit sessions carry the Google Health dataPoint name in external_id, which makes
+    re-syncing idempotent."""
+
+    __tablename__ = "run_logs"
+    __table_args__ = (
+        Index("ix_run_logs_user_date", "user_id", "date"),
+        Index(
+            "uq_run_logs_user_external", "user_id", "external_id",
+            unique=True, postgresql_where=text("external_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    date: Mapped[date] = mapped_column(Date)
+    distance_km: Mapped[float] = mapped_column(Float)
+    duration_min: Mapped[float] = mapped_column(Float)
+    avg_hr_bpm: Mapped[int | None] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(12), default="manual", server_default="manual")  # manual | assistant | google
+    external_id: Mapped[str | None] = mapped_column(String(200))
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

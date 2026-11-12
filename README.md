@@ -36,10 +36,24 @@ and log days without connecting Google Health or FatSecret.
   kahvaltı") and log it with one sentence or one click, optionally scaled ("1.5 porsiyon").
   *Workout templates* (starter Push/Pull/Legs or your own) prefill the log form — with the weights
   from your last session, so progressive overload is one edit away. Fiber is tracked per meal,
-  per template and per day alongside protein/carbs/fat.
-- **Programs:** generates training and nutrition programs on the plan-tier model with
-  schema-validated structured output, tracks adherence against your workout and food logs, and
-  reviews or regenerates them on demand.
+  per template and per day alongside protein/carbs/fat. The web **Add meal** form only asks for
+  food **names + grams** — kcal/macros are resolved automatically (`POST /users/{id}/meals/compute`:
+  FatSecret per-100g hit first, otherwise one batched LLM estimate), and saved templates load into
+  the same editable rows.
+- **Programs, planned on Telegram:** the weekly plan (7 days of training incl. cardio + numeric
+  nutrition targets) is created **from chat** — send `/plan` or just ask ("bana haftalık plan yap");
+  the `create_weekly_plan` tool designs and activates both halves on the plan-tier model with
+  schema-validated structured output, and they appear on the web Plan page and Calendar
+  automatically. Nutrition plans are **numbers only** (kcal, protein, carbs, fat, fiber, sodium
+  cap) — no menus unless you explicitly ask what to eat. Report adherence problems ("Fridays no
+  longer work") in chat and the coach **revises and re-activates** the plan as a new version; old
+  versions stay in history. Strength tracking: per-set weight/reps/RPE/**RIR**, Epley e1RM, weekly
+  volume load, PRs — all queryable by the LLM (`strength_summary`) and charted in the dashboard.
+- **Cardio capacity:** runs arrive three ways — automatically from Fitbit **exercise sessions** on
+  every sync (running-family types at run pace; idempotent via the Google Health dataPoint name),
+  from chat ("5 km koştum, 27:30, nabız 152" → `log_run`), or the Cardio page form. Pace and HR
+  trends show aerobic progress (same pace at lower HR = fitter) with a Riegel 5k estimate per run,
+  and the coach analyzes pace-vs-HR drift from the run history in its prompt.
 - **Chat anywhere, one memory:** conversation history is server-side, so the web UI and the Telegram
   bot share the same conversation. The bot runs fully local via long polling — no public URL needed.
 - **Wearable and nutrition sync:** connects Fitbit data through the Google Health API (OAuth 2.0) and
@@ -165,12 +179,20 @@ python -m scripts.telegram_bot      # terminal 3 (optional): the Telegram bot, s
 ```
 
 The dashboard (`web/`, Vite + React + Tailwind + Recharts, one-time `npm install`) is the main
-tracking UI: Today (calorie ring, metrics, planned session), Trends (weight/HRV/sleep/intake
-charts), Nutrition, Workouts (per-exercise **weight progression**: top weight, volume, set-by-set
-history), Measures (weight/body-fat/tape), Memory, Cost (LLM spend + cache-hit dashboard) and
-Settings (profile, provider connect/sync). Chat itself lives on Telegram. The dev server proxies
-API paths to `:8000`, so no CORS setup is needed. The older Streamlit UI (`streamlit run
-ui/streamlit_app.py`) still works and keeps the chat page.
+tracking UI — dark theme with lime→cyan gradients (Archivo body, Space Grotesk numerals): Today
+(gradient calorie ring, sleep stages, steps/burn), Trends (weight/HRV/sleep/intake charts), Plan
+(weekly grid, revise box, version history — generation happens on Telegram), **Calendar** (month
+view: planned day type vs. logged workouts/runs, kcal-vs-target colors and per-day step counts; clicking a day opens
+its detail: planned session/focus/cardio, steps vs goal, taken-vs-target kcal/macros/fiber/sodium),
+Nutrition (name+grams meal logging with auto-computed **and editable** macros, templates, numeric
+targets only), Workouts
+(per-exercise **weight progression**: top weight, e1RM, volume, set-by-set history), **Cardio**
+(pace & HR trends, Riegel 5k estimate, run log), Measures, Memory, Cost (LLM spend + cache-hit
+dashboard) and Settings (profile, provider connect/sync). Chat itself lives on Telegram. The dev
+server proxies API paths to `:8000`, so no CORS setup is needed. The dev server listens on all
+interfaces (`host: true`), so a phone on the same Wi-Fi can open `http://<mac-lan-ip>:5173`
+(anywhere-else access: put the Mac on a free Tailscale tailnet and open the Tailscale IP). The
+older Streamlit UI (`streamlit run ui/streamlit_app.py`) still works and keeps the chat page.
 
 ```bash
 curl -X POST localhost:8000/ask -H 'Content-Type: application/json' \
@@ -316,7 +338,8 @@ Then run `python -m scripts.telegram_bot` (locally) or enable the `bot` service 
 restarts on crashes: put a plist with `RunAtLoad`/`KeepAlive` running the command above (working
 directory = repo root) in `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$UID <plist>`.
 Plain text goes to the coach (including logging via its tools); commands:
-`/today`, `/meals`, `/workout`, `/plan [training|nutrition] [brief]`, `/review [regenerate]`,
+`/today`, `/meals`, `/workout`, `/plan` (no args: unified weekly plan — training+cardio+nutrition;
+`/plan training|nutrition [brief]` for one), `/review [regenerate]`,
 `/sync`, `/memory`, `/forget <kind> <key>`, `/start`.
 
 ## Models and costs

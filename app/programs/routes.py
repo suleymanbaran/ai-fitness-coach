@@ -23,8 +23,11 @@ from app.programs.schemas import (
     ExerciseHistoryRow,
     GenerateProgramIn,
     ProgramOut,
+    ReviseIn,
     ReviewOut,
+    StrengthOut,
     TodaySessionOut,
+    WeeklyPlanIn,
     WorkoutIn,
     WorkoutOut,
 )
@@ -91,6 +94,59 @@ def program_detail(
     if program is None:
         raise HTTPException(status_code=404, detail="Program not found")
     return ProgramOut.model_validate(program, from_attributes=True)
+
+
+@router.post("/users/{user_id}/plans/weekly")
+def plan_week(
+    body: WeeklyPlanIn,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    current: str | None = Depends(current_user_id),
+    embedder: Embedder = Depends(get_embedder),
+    store: ProtocolStore = Depends(get_store),
+    coach: CoachClient = Depends(get_coach),
+) -> dict:
+    """Generate training (incl. cardio) + nutrition as one coherent plan; both activate."""
+    authorize(user_id, current)
+    user = _require_user(db, user_id)
+    if not store.is_ready():
+        raise HTTPException(status_code=503, detail="Knowledge base is empty. Run: python -m scripts.ingest")
+    try:
+        training, nutrition = service.generate_weekly_plan(db, coach, embedder, store, user, body.brief, settings)
+    except service.ProgramGenerationError:
+        raise HTTPException(
+            status_code=502, detail="Weekly plan generation failed schema validation twice. Try again in a moment."
+        ) from None
+    return {
+        "training": ProgramOut.model_validate(training, from_attributes=True),
+        "nutrition": ProgramOut.model_validate(nutrition, from_attributes=True),
+    }
+
+
+@router.post("/users/{user_id}/programs/{program_id}/revise", response_model=ProgramOut)
+def revise(
+    program_id: int,
+    body: ReviseIn,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    current: str | None = Depends(current_user_id),
+    embedder: Embedder = Depends(get_embedder),
+    store: ProtocolStore = Depends(get_store),
+    coach: CoachClient = Depends(get_coach),
+) -> ProgramOut:
+    """Adherence feedback in, next version out — created and activated immediately."""
+    authorize(user_id, current)
+    user = _require_user(db, user_id)
+    program = service.get_program(db, user_id, program_id)
+    if program is None:
+        raise HTTPException(status_code=404, detail="Program not found")
+    try:
+        revised = service.revise_program(db, coach, embedder, store, user, program, body.feedback, settings)
+    except service.ProgramGenerationError:
+        raise HTTPException(status_code=502, detail="Revision failed schema validation twice. Try again.") from None
+    return ProgramOut.model_validate(revised, from_attributes=True)
 
 
 @router.post("/users/{user_id}/programs/{program_id}/activate", response_model=ProgramOut)
@@ -266,6 +322,20 @@ def exercise_history(
     authorize(user_id, current)
     _require_user(db, user_id)
     return service.exercise_history(db, user_id, name, days)
+
+
+@router.get("/users/{user_id}/exercises/strength", response_model=StrengthOut)
+def exercise_strength(
+    name: str = Query(..., min_length=1, max_length=120, description="Substring match on the exercise name"),
+    weeks: int = Query(8, ge=1, le=52),
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+) -> StrengthOut:
+    """Weekly sets/volume/e1RM plus the all-time PR for one exercise."""
+    authorize(user_id, current)
+    _require_user(db, user_id)
+    return service.strength_summary(db, user_id, name, weeks)
 
 
 @router.delete("/users/{user_id}/workouts/{workout_id}", status_code=204)

@@ -22,10 +22,11 @@ Rules:
 - Reply in the language the user writes in.
 
 First conversations (onboarding):
-- If the profile line below is missing age or weight, or <memories> says nothing is recorded yet,
-  start with a short intake before giving deep advice. Ask in one friendly message for: age,
-  weight, training experience, days per week available, equipment access, injuries or pains, and
-  dietary restrictions. Ask at most 3-4 questions per turn; never interrogate.
+- If the profile line below is missing age, weight or height, or <memories> says nothing is
+  recorded yet, start with a short intake before giving deep advice. Ask in one friendly message
+  for: age, height, weight, training experience, days per week available, equipment access,
+  injuries or pains, and dietary restrictions. Ask at most 3-4 questions per turn; never
+  interrogate. Store height with update_profile (height_cm).
 - As answers arrive, store them immediately: profile numbers with update_profile, everything else
   (schedule, equipment, injuries, food rules, likes/dislikes) with save_memory.
 - If the user asks a real question during onboarding, answer it first, then continue the intake.
@@ -49,10 +50,29 @@ Interpretation reference (stable across conversations; protocols below take prec
   independently call for it.
 - Strength progression: double progression (add reps within the range, then add load), RPE 7-8
   for main lifts, deload every 4-8 weeks or after two consecutively degraded sessions.
+- Training volume & intensity (evidence-based):
+  - Weekly sets per muscle follow a graded dose-response (Schoenfeld 2017 meta-analysis): <5 is
+    minimal, 5-9 moderate, 10+ gives the greatest hypertrophy. Practical landmarks: MEV ~6-10,
+    MAV ~12-16, MRV ~20+ sets per muscle per week; deload when sessions degrade or MRV is exceeded.
+  - Proximity to failure: RPE = 10 - RIR (reps in reserve). Keep most working sets at 1-3 RIR
+    (RPE 7-9); go to failure (0 RIR) sparingly and never early in a session; heavy strength work
+    lives at 2-4 RIR.
+  - Rep ranges from 5 to 30 build muscle similarly at equal proximity to failure; 6-12 is the
+    most time-efficient band.
+  - Estimated 1RM (Epley) = weight x (1 + reps/30). Prescribe loads from e1RM: strength 80-90%,
+    hypertrophy 65-80%. Volume load = sets x reps x weight and should trend up at stable RIR.
+  - Before prescribing loads or judging progress, call strength_summary for the user's actual
+    weekly sets, volume, e1RM and PRs. When a training-science question goes beyond the
+    protocols, look it up with web search and say where it comes from.
 - Body weight: judge the 7-day mean, never single readings. Fat loss aim: 0.5-0.7% of body weight
   per week; if the mean stalls 2+ weeks with adherence intact, cut 150-250 kcal or add steps.
 - Zone 2: conversational pace, roughly 60-70% of max HR; 2-3 sessions of 30-45 min per week
   support recovery without taxing the CNS.
+- Running / aerobic capacity: judge progress by pace-vs-heart-rate across runs — same pace at a
+  lower avg HR (or faster pace at the same HR) means improving fitness; a rising HR at steady
+  pace signals fatigue, heat or under-recovery. Convert race times across distances with Riegel:
+  T2 = T1 x (D2/D1)^1.06 (e.g. estimate their 5k from a 3k or 10k effort). The run history block
+  below already lists pace per run; the Cardio page shows a Riegel 5k estimate per run.
 - Modifiers that raise resting HR and lower HRV for 1-2 days: alcohol (even 1-2 drinks), late
   heavy meals, caffeine after mid-afternoon, travel, illness. Discount those days, don't chase them.
 - Answer shape: lead with the verdict in one sentence, then the concrete prescription
@@ -66,9 +86,10 @@ Watch tomorrow's HRV: if it recovers within 10% of baseline, resume the program.
 Memory and tools:
 - <memories> holds durable facts and preferences the user stated or you confirmed earlier.
   Respect them without re-asking (equipment, disliked exercises, dietary rules, schedule).
-- When the user reports metrics, a meal or a workout (including past days: "on Monday I ran 5k"),
-  log them with the appropriate tool instead of only acknowledging them, then confirm in one
-  short line what was stored.
+- When the user reports metrics, a meal, a workout or a run (including past days: "on Monday I
+  ran 5k"), log them with the appropriate tool — log_workout for strength sessions, log_run for
+  runs (distance, time, avg HR when known) — instead of only acknowledging them, then confirm
+  in one short line what was stored.
 - When the user states their weight or any body measurement, ALWAYS store it with
   log_measurement (not update_profile) so it enters their measurement history and charts.
 - Calories, in order: search_food (FatSecret) first; if the food is missing — common for non-US
@@ -80,6 +101,18 @@ Memory and tools:
 - <templates> lists the user's saved meal and workout templates. When they say they had their
   usual (e.g. "her zamanki kahvaltı"), log it with use_meal_template (factor scales portions).
   When they describe a meal they eat often, offer to save it with save_meal_template.
+- Nutrition advice style (stated preference): by default give NUMBERS — kcal, protein, carbs,
+  fat, fiber and salt/sodium targets — not menus. But when the user directly asks what to eat
+  ("ne yemeliyim?", "what should I eat?"), DO recommend concrete meals and foods that fit their
+  targets, memories, templates and the macros still missing that day.
+- When the user asks for a NEW weekly plan in chat, call create_weekly_plan (summarize their
+  wishes in `brief`) — it saves the plan to their web Plan page and calendar. Never reply with a
+  fresh plan as chat text only. For changes to the CURRENT plan, use revise_program.
+- Plan adherence: if the user reports they CANNOT adhere to their plan or asks for a structural
+  change (available days, equipment, disliked exercises or foods, pain, schedule), call
+  revise_program — it creates and activates the next version, keeping history. Use
+  adjust_session for one-off single-day changes, and save_memory for durable preferences.
+  A single missed session is normal: acknowledge it, adjust today if needed, do not revise.
 - If a tool fails, say so plainly and continue with what you know; never invent tool results."""
 
 
@@ -104,7 +137,10 @@ def _pct_change(today: float | None, baseline: float | None) -> str:
 
 
 def format_profile(user: UserProfile) -> str:
-    return f"User: {user.name}, {_fmt(user.age, ' years')}, {_fmt(user.weight_kg, ' kg')}, goal: {user.goal}"
+    return (
+        f"User: {user.name}, {_fmt(user.age, ' years')}, {_fmt(user.weight_kg, ' kg')}, "
+        f"{_fmt(user.height_cm, ' cm')}, goal: {user.goal}"
+    )
 
 
 def format_memories(memories: list[MemoryEntry]) -> str:
@@ -126,6 +162,7 @@ def format_user_context(user: UserProfile) -> str:
 
     has_duration = any(d.sleep_minutes is not None for d in days)
     has_activity = any(d.steps is not None or d.active_kcal is not None for d in days)
+    has_total_burn = any(d.total_kcal is not None for d in days)
     has_stages = any(d.sleep_stages for d in days)
 
     def day_line(d: DailyMetrics) -> str:
@@ -142,7 +179,9 @@ def format_user_context(user: UserProfile) -> str:
                 f"light {s.get('light', 0)}m, awake {s.get('awake', 0)}m]"
             )
         if has_activity:
-            line += f", steps {_fmt(d.steps)}, burned {_fmt(d.active_kcal, ' kcal')}"
+            line += f", steps {_fmt(d.steps)}, active burn {_fmt(d.active_kcal, ' kcal')}"
+        if has_total_burn:
+            line += f", total burn {_fmt(_adjusted_burn(d.total_kcal), ' kcal')}"
         return line
 
     latest = "Today" if today.date == date.today() else "Latest day on file"
@@ -155,9 +194,24 @@ def format_user_context(user: UserProfile) -> str:
     if has_duration:
         lines.append(f"  Time asleep {_hours(today.sleep_minutes)} vs {_hours(today.sleep_minutes_baseline)}")
     if has_activity:
-        lines.append(f"  Steps {_fmt(today.steps)}, active energy burned {_fmt(today.active_kcal, ' kcal')}")
+        line = f"  Steps {_fmt(today.steps)}, active energy burned {_fmt(today.active_kcal, ' kcal')}"
+        if has_total_burn:
+            line += (
+                f", TOTAL energy burned (Fitbit x{TOTAL_BURN_FACTOR}, incl. BMR) "
+                f"{_fmt(_adjusted_burn(today.total_kcal), ' kcal')}"
+            )
+        lines.append(line)
     lines += ["Daily log (oldest first):", *(day_line(d) for d in days)]
     return "\n".join(lines)
+
+
+# The user considers Fitbit's total-burn ~10% optimistic; the raw value stays in the DB and the
+# discount is applied wherever burn feeds analysis (prompt + Trends energy balance).
+TOTAL_BURN_FACTOR = 0.9
+
+
+def _adjusted_burn(total_kcal: int | None) -> int | None:
+    return None if total_kcal is None else round(total_kcal * TOTAL_BURN_FACTOR)
 
 
 def _hours(minutes: float | None) -> str:
@@ -221,7 +275,22 @@ def _format_set(s: LoggedSet) -> str:
         parts.append(f"@ {s.weight_kg:g} kg")
     if s.rpe is not None:
         parts.append(f"rpe {s.rpe:g}")
+    if s.rir is not None:
+        parts.append(f"{s.rir} RIR")
     return "(" + ", ".join(parts) + ")"
+
+
+def format_runs(runs: list) -> str:
+    """Recent RunLog rows, oldest first, with pace so the model can reason about HR-vs-pace."""
+    if not runs:
+        return ""
+    lines = []
+    for r in runs:
+        pace = r.duration_min / r.distance_km
+        pace_str = f"{int(pace)}:{round((pace - int(pace)) * 60):02d}/km"
+        hr = f", avg HR {r.avg_hr_bpm}" if r.avg_hr_bpm else ""
+        lines.append(f"- {r.date} {r.distance_km:g} km in {r.duration_min:g} min ({pace_str}{hr})")
+    return "Run history (last 90 days, most recent last):\n" + "\n".join(lines)
 
 
 def format_chunks(chunks: list[RetrievedChunk]) -> str:
@@ -239,6 +308,7 @@ def build_prompt(
     program_summary: str = "",
     intake: str = "",
     workouts: str = "",
+    runs: str = "",
     templates: str = "",
 ) -> PromptParts:
     stable_blocks = [SYSTEM_PROMPT, format_profile(user), format_memories(memories)]
@@ -247,6 +317,8 @@ def build_prompt(
     volatile_blocks = [format_user_context(user)]
     if workouts:
         volatile_blocks.append(workouts)
+    if runs:
+        volatile_blocks.append(runs)
     if intake:
         volatile_blocks.append(intake)
     if templates:

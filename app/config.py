@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     auth_enabled: bool = False
     ask_rate_limit_per_minute: int = 20
     openai_timeout_seconds: float = 30.0
+    # Program generation/review produces long structured output on the plan tier.
+    plan_timeout_seconds: float = 180.0
 
     # Integrations. Each provider is enabled only when its credentials are set.
     # TOKEN_ENCRYPTION_KEY encrypts stored OAuth tokens; generate with scripts/generate_key.py.

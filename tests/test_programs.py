@@ -1,7 +1,7 @@
 """Program generation/activation/review, workout logging and the program tools."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -24,7 +24,7 @@ VALID_TRAINING = {
                 "days": [
                     {"name": "Lower A", "focus": "squat", "exercises": [
                         {"name": "Leg press", "sets": 4, "reps": "8-10", "weight_guidance": "RPE 7", "rpe_target": "7"}]},
-                    {"name": "Upper A", "focus": "press", "exercises": [
+                    {"name": "Upper A", "focus": "press", "day_type": "mixed", "cardio": "20 min zone 2 row", "exercises": [
                         {"name": "Bench press", "sets": 4, "reps": "6", "weight_guidance": "RPE 7", "rpe_target": "7"}]},
                     {"name": "Lower B", "focus": "hinge", "exercises": [
                         {"name": "RDL", "sets": 3, "reps": "8", "weight_guidance": "RPE 7", "rpe_target": ""}]},
@@ -48,6 +48,17 @@ VALID_NUTRITION = {
 }
 
 
+VALID_WEEKLY = {
+    "training_name": "Weekly Strength + Cardio",
+    "training_summary": "4 strength days + 2 zone-2 cardio sessions, RPE 7-8.",
+    "nutrition_name": "Balanced 2400",
+    "nutrition_summary": "2400 kcal, 170 g protein, carbs around training.",
+    "rationale": "Coherent plan per goal and metrics.",
+    "training": VALID_TRAINING["plan"],
+    "nutrition": VALID_NUTRITION["plan"],
+}
+
+
 class PlanCoach(FakeCoach):
     """Answers plan-tier calls with scripted program JSON / review markdown; fast calls normally."""
 
@@ -65,8 +76,13 @@ class PlanCoach(FakeCoach):
             if self.plan_payloads is not None:
                 payload = self.plan_payloads.pop(0)
             else:
-                kind = "training" if "training" in str(kwargs.get("schema_name")) else "nutrition"
-                payload = json.dumps(VALID_TRAINING if kind == "training" else VALID_NUTRITION)
+                schema_name = str(kwargs.get("schema_name"))
+                if schema_name == "weekly_plan":
+                    payload = json.dumps(VALID_WEEKLY)
+                elif "training" in schema_name:
+                    payload = json.dumps(VALID_TRAINING)
+                else:
+                    payload = json.dumps(VALID_NUTRITION)
             return LLMReply(text=payload, usage=LLMUsage.zero("fake-plan"))
         if kwargs.get("tier") == "plan":
             return LLMReply(text=self.assessment, usage=LLMUsage.zero("fake-plan"))
@@ -175,7 +191,7 @@ def test_workout_endpoints(plan_app):
     assert r.status_code == 200
     body = r.json()
     assert body["program_id"] == program["id"]
-    assert body["exercises"][0]["sets"][0] == {"reps": 10, "weight_kg": 120.0, "rpe": 7.0}
+    assert body["exercises"][0]["sets"][0] == {"reps": 10, "weight_kg": 120.0, "rpe": 7.0, "rir": None}
     assert str(body["date"]) == str(TODAY)
 
     workouts = client.get("/users/u1/workouts?days=7").json()
@@ -253,7 +269,7 @@ def test_exercise_history_endpoint_and_tool(plan_app):
         ("Bench press", 80.0, 10, 800.0),
         ("Incline bench press", 60.0, 8, 480.0),
     ]
-    assert history[0]["sets"][1] == {"reps": 5, "weight_kg": 80.0, "rpe": 8.0}
+    assert history[0]["sets"][1] == {"reps": 5, "weight_kg": 80.0, "rpe": 8.0, "rir": None}
 
     # The LLM tool renders the same data as compact text lines.
     from app.config import Settings
@@ -265,6 +281,125 @@ def test_exercise_history_endpoint_and_tool(plan_app):
 
     assert client.get("/users/nobody/exercises").status_code == 404
     assert client.get("/users/u1/exercises/history").status_code == 422  # name is required
+
+
+def test_weekly_plan_generates_and_activates_both(plan_app):
+    client = plan_app.client
+    r = client.post("/users/u1/plans/weekly", json={"brief": "4 days/week, fat loss"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["training"]["kind"] == "training" and body["training"]["status"] == "active"
+    assert body["nutrition"]["kind"] == "nutrition" and body["nutrition"]["status"] == "active"
+    assert body["training"]["version"] == 1 and body["nutrition"]["version"] == 1
+    assert body["nutrition"]["payload"]["target_kcal"] == 2200
+
+    # The weekly task instructions and both protocol categories reached the model.
+    call = plan_app.coach.calls[0]
+    assert call.kwargs["schema_name"] == "weekly_plan"
+    assert "coherent weekly plan" in call.volatile
+    assert "4 days/week, fat loss" in call.volatile
+
+    # Both summaries land in the cached stable prefix of subsequent chats.
+    client.post("/ask", json={"user_id": "u1", "question": "What is my plan?"})
+    stable = plan_app.coach.answer_call.stable
+    assert "Weekly Strength + Cardio" in stable
+    assert "Balanced 2400" in stable
+
+
+def test_revise_endpoint_creates_and_activates_next_version(plan_app):
+    client = plan_app.client
+    program = generate(client).json()
+    client.post(f"/users/u1/programs/{program['id']}/activate")
+
+    r = client.post(f"/users/u1/programs/{program['id']}/revise", json={"feedback": "Mondays no longer work, move to Saturday"})
+    assert r.status_code == 200
+    assert r.json()["version"] == 2 and r.json()["status"] == "active"
+
+    statuses = {p["version"]: p["status"] for p in client.get("/users/u1/programs").json() if p["kind"] == "training"}
+    assert statuses == {1: "archived", 2: "active"}
+
+    # The revision call carries the current plan and the feedback.
+    revise_call = [c for c in plan_app.coach.calls if c.kwargs.get("json_schema") is not None][-1]
+    assert "Mondays no longer work" in revise_call.volatile
+    assert "4-Day Strength" in revise_call.volatile
+
+
+def test_revise_program_tool(plan_app):
+    from app.config import Settings
+    from app.rag.tools import PlanContext, build_ask_tools
+    from tests.fakes import FakeEmbedder
+
+    client = plan_app.client
+    program = generate(client).json()
+    client.post(f"/users/u1/programs/{program['id']}/activate")
+
+    ctx = PlanContext(coach=plan_app.coach, embedder=FakeEmbedder(), store=plan_app.store)
+    _, handlers = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None), None, plan_ctx=ctx)
+
+    result = handlers["revise_program"]({"kind": "training", "feedback": "no barbell work, knee hurts"})
+    assert result.startswith("training program revised to v2 and activated")
+
+    # kind inference when only one program is active
+    result = handlers["revise_program"]({"feedback": "make it 3 days"})
+    assert "revised to v3" in result
+
+    # Without plan context the tool degrades gracefully.
+    _, no_ctx = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None))
+    assert no_ctx["revise_program"]({"feedback": "x"}).startswith("error: program revision is not available")
+
+
+def test_today_session_renders_day_type_and_cardio(plan_app):
+    from datetime import datetime, timedelta, UTC
+
+    from app.db.models import Program as ProgramRow
+    from app.programs.service import today_session
+
+    this_monday = TODAY - timedelta(days=TODAY.weekday())
+    program = ProgramRow(
+        user_id="u1", kind="training", status="active", version=1, name="t", summary="s",
+        payload=VALID_TRAINING["plan"], activated_at=datetime(this_monday.year, this_monday.month, this_monday.day, tzinfo=UTC),
+    )
+    # Slot 1 (Tuesday) = "Upper A" with day_type mixed + cardio
+    tuesday = this_monday + timedelta(days=1)
+    text = today_session(program, tuesday)
+    assert "Upper A — press [mixed]" in text
+    assert "Cardio: 20 min zone 2 row" in text
+    assert "Bench press: 4 x 6" in text
+
+
+def test_strength_summary_weekly_volume_and_pr(plan_app):
+    from app.config import Settings
+    from app.rag.tools import build_ask_tools
+
+    client = plan_app.client
+    client.post("/users/u1/workouts", json={
+        "date": str(TODAY - timedelta(days=7)),
+        "session_name": "Push A",
+        "exercises": [{"name": "Bench press", "sets": [
+            {"reps": 5, "weight_kg": 75, "rir": 3}, {"reps": 5, "weight_kg": 75, "rir": 2}]}],
+    })
+    client.post("/users/u1/workouts", json={
+        "session_name": "Push B",
+        "exercises": [{"name": "Bench press", "sets": [
+            {"reps": 5, "weight_kg": 80, "rpe": 8}, {"reps": 4, "weight_kg": 80, "rir": 1}]}],
+    })
+
+    history = client.get("/users/u1/exercises/history", params={"name": "bench"}).json()
+    # Epley: 80 x (1 + 5/30) = 93.3 for the best set of the second session
+    assert history[1]["est_1rm_kg"] == 93.3
+    assert history[0]["sets"][0]["rir"] == 3
+
+    strength = client.get("/users/u1/exercises/strength", params={"name": "bench"}).json()
+    assert strength["pr_weight_kg"] == 80.0 and strength["pr_reps"] == 5
+    assert strength["best_e1rm_kg"] == 93.3
+    assert len(strength["weekly"]) == 2  # two different ISO weeks
+    assert strength["weekly"][0]["sets"] == 2 and strength["weekly"][0]["volume_kg"] == 750.0
+
+    _, handlers = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None))
+    text = handlers["strength_summary"]({"exercise": "bench"})
+    assert "PR 80 kg x 5" in text and "best est. 1RM 93.3 kg" in text
+    assert "2 sets, volume 750 kg" in text
+    assert handlers["strength_summary"]({"exercise": "squat"}).startswith("no logged history")
 
 
 def test_adjust_session_overrides_the_planned_day(plan_app):
@@ -309,3 +444,51 @@ def test_strict_schema_marks_every_object():
                 check(value)
 
     check(schema)
+
+
+def test_create_weekly_plan_tool(plan_app):
+    from app.config import Settings
+    from app.rag.tools import PlanContext, build_ask_tools
+    from tests.fakes import FakeEmbedder
+
+    ctx = PlanContext(coach=plan_app.coach, embedder=FakeEmbedder(), store=plan_app.store)
+    _, handlers = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None), None, plan_ctx=ctx)
+    result = handlers["create_weekly_plan"]({"brief": "4 days, knee-friendly"})
+    assert "weekly plan created and activated" in result
+
+    active = plan_app.client.get("/users/u1/programs?status=active").json()
+    assert {p["kind"] for p in active} == {"training", "nutrition"}
+
+    _, no_ctx = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None))
+    assert no_ctx["create_weekly_plan"]({}).startswith("error: weekly planning is not available")
+
+
+def test_today_session_matches_named_dates():
+    from datetime import date as _date
+
+    from app.db.models import Program
+    from app.programs.service import today_session
+
+    def day(name, focus, day_type, cardio="", exercises=None):
+        return {"name": name, "focus": focus, "day_type": day_type, "cardio": cardio,
+                "exercises": exercises or []}
+
+    bench = [{"name": "Bench press", "sets": 3, "reps": "8", "weight_guidance": "moderate"}]
+    days = [
+        day("Perşembe 13 Kasım — 1. gün", "Push", "strength", exercises=bench),
+        day("Cuma 14 Kasım — 2. gün", "Cardio", "cardio", cardio="30 min zone 2 row"),
+        day("Cumartesi 15 Kasım — 3. gün", "Rest", "rest"),
+        day("Pazar 16 Kasım — 4. gün", "Pull", "strength"),
+        day("Pazartesi 17 Kasım — 5. gün", "Rest", "rest"),
+        day("Salı 18 Kasım — 6. gün", "Legs", "strength"),
+        day("Çarşamba 19 Kasım — 7. gün", "Upper", "mixed"),
+    ]
+    program = Program(
+        user_id="u1", kind="training", status="active", version=1,
+        name="dated", summary="s", payload={"weeks": [{"focus": "test", "days": days}]},
+    )
+    # Thursday Nov 13 must hit day 1 (weekday-slot fallback would wrongly pick days[3]).
+    assert "Push" in today_session(program, _date(2026, 11, 13))
+    assert "Bench press" in today_session(program, _date(2026, 11, 13))
+    assert "30 min zone 2" in today_session(program, _date(2026, 11, 14))
+    assert "does not cover" in today_session(program, _date(2026, 11, 25))

@@ -10,17 +10,24 @@ function CalorieRing({ eaten, target }: { eaten: number; target: number | null }
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const fraction = target ? Math.min(eaten / target, 1) : 0;
+  const over = target != null && eaten > target;
   return (
     <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} className="-rotate-90">
-        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="#27272a" strokeWidth={stroke} />
+        <defs>
+          <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stopColor="#a3e635" />
+            <stop offset="100%" stopColor="#22d3ee" />
+          </linearGradient>
+        </defs>
+        <circle cx={size / 2} cy={size / 2} r={radius} fill="none" stroke="#2c3540" strokeWidth={stroke} />
         {target && (
           <circle
             cx={size / 2}
             cy={size / 2}
             r={radius}
             fill="none"
-            stroke="#a3e635"
+            stroke={over ? "#fb7185" : "url(#ringGrad)"}
             strokeWidth={stroke}
             strokeLinecap="round"
             strokeDasharray={`${fraction * circumference} ${circumference}`}
@@ -28,9 +35,9 @@ function CalorieRing({ eaten, target }: { eaten: number; target: number | null }
         )}
       </svg>
       <div className="absolute flex flex-col items-center">
-        <Flame className="mb-1 h-5 w-5 text-lime-400" />
-        <span className="text-3xl font-bold">{eaten.toLocaleString()}</span>
-        <span className="text-xs text-zinc-500">{target ? `of ${target.toLocaleString()} kcal` : "kcal today"}</span>
+        <Flame className="mb-1 h-5 w-5 text-ember" />
+        <span className="font-grotesk text-3xl font-bold tabular-nums text-cloud">{eaten.toLocaleString()}</span>
+        <span className="text-xs text-mist">{target ? `of ${target.toLocaleString()} kcal` : "kcal today"}</span>
       </div>
     </div>
   );
@@ -60,7 +67,11 @@ export default function Today({ userId }: { userId: string }) {
     setSyncMsg("");
     try {
       const results = await api.sync(userId, 7);
-      setSyncMsg(results.map((r) => `${r.provider}: ${r.error ?? `${r.days_updated} days`}`).join(" · ") || "No providers connected");
+      setSyncMsg(
+        results
+          .map((r) => `${r.provider}: ${r.error ?? `${r.days_updated} days${r.runs_new ? ` + ${r.runs_new} run${r.runs_new > 1 ? "s" : ""}` : ""}`}`)
+          .join(" · ") || "No providers connected"
+      );
       profile.reload();
       intake.reload();
     } catch (err) {
@@ -88,7 +99,7 @@ export default function Today({ userId }: { userId: string }) {
   return (
     <div>
       <PageHeader
-        title={`Hello, ${profile.data?.name ?? userId}`}
+        title="Today"
         subtitle={new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}
       >
         <Button onClick={sync} disabled={syncing}>
@@ -96,9 +107,9 @@ export default function Today({ userId }: { userId: string }) {
           {syncing ? "Syncing..." : "Sync wearables"}
         </Button>
       </PageHeader>
-      {syncMsg && <p className="mb-4 text-sm text-zinc-400">{syncMsg}</p>}
+      {syncMsg && <p className="mb-4 text-sm text-mist">{syncMsg}</p>}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-7">
         <Stat label="HRV" value={fmt(day?.hrv_ms, 1)} unit="ms" delta={hrvDelta.text} deltaGood={hrvDelta.good} />
         <Stat label="Resting HR" value={fmt(day?.resting_hr_bpm)} unit="bpm" delta={rhrDelta.text} deltaGood={rhrDelta.good} />
         <Stat
@@ -107,15 +118,23 @@ export default function Today({ userId }: { userId: string }) {
           unit={sleepHours != null ? "h" : day?.sleep_score != null ? "/100" : undefined}
         />
         <Stat label="Steps" value={day?.steps != null ? day.steps.toLocaleString() : "—"} />
-        <Stat label="Burned" value={fmt(day?.active_kcal)} unit="kcal" />
+        <Stat label="Active burn" value={fmt(day?.active_kcal)} unit="kcal" />
+        {/* Same accuracy margin as the Trends energy balance: Fitbit totals run ~10% optimistic. */}
+        <Stat
+          label="Total burn"
+          value={day?.total_kcal != null ? Math.round(day.total_kcal * 0.9).toLocaleString() : "—"}
+          unit="kcal"
+          delta="Fitbit ×0.9, incl. BMR"
+          deltaGood={null}
+        />
         <Stat label="Weight" value={fmt(profile.data?.weight_kg, 1)} unit="kg" />
       </div>
 
       {day?.sleep_stages && (
-        <p className="mt-3 text-sm text-zinc-400">
+        <p className="mt-3 text-sm text-mist">
           Last night's sleep stages:{" "}
-          <span className="text-indigo-300">deep {day.sleep_stages.deep ?? 0}m</span> ·{" "}
-          <span className="text-sky-300">REM {day.sleep_stages.rem ?? 0}m</span> ·{" "}
+          <span className="text-violet">deep {day.sleep_stages.deep ?? 0}m</span> ·{" "}
+          <span className="text-cyan">REM {day.sleep_stages.rem ?? 0}m</span> ·{" "}
           light {day.sleep_stages.light ?? 0}m · awake {day.sleep_stages.awake ?? 0}m
         </p>
       )}
@@ -126,7 +145,7 @@ export default function Today({ userId }: { userId: string }) {
             <CalorieRing eaten={eatenToday} target={nutritionTarget} />
           </div>
           {!nutritionTarget && (
-            <p className="text-center text-xs text-zinc-500">Activate a nutrition program to see a target ring.</p>
+            <p className="text-center text-xs text-mist">Activate a nutrition program to see a target ring.</p>
           )}
         </Card>
 
@@ -134,7 +153,7 @@ export default function Today({ userId }: { userId: string }) {
           {session.loading ? (
             <Spinner label="" />
           ) : session.data ? (
-            <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-zinc-300">{session.data.text}</pre>
+            <pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-cloud">{session.data.text}</pre>
           ) : (
             <Empty>Could not load the session.</Empty>
           )}
@@ -143,15 +162,15 @@ export default function Today({ userId }: { userId: string }) {
 
       <Card title="Today's meals" className="mt-4">
         {meals.data && meals.data.length > 0 ? (
-          <ul className="divide-y divide-zinc-800">
+          <ul className="divide-y divide-edge">
             {meals.data.map((m) => (
               <li key={m.id} className="flex items-center justify-between py-2.5">
                 <div>
-                  <span className="text-sm font-medium text-zinc-200">{m.description}</span>
-                  <span className="ml-2 text-xs text-zinc-500">{m.meal}</span>
+                  <span className="text-sm font-medium text-cloud">{m.description}</span>
+                  <span className="ml-2 text-xs text-mist">{m.meal}</span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-semibold text-lime-400">{m.kcal} kcal</span>
+                  <span className="text-sm font-semibold text-lime">{m.kcal} kcal</span>
                   <Badge tone={m.source === "assistant" ? "amber" : "zinc"}>{m.source}</Badge>
                 </div>
               </li>

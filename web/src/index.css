@@ -1,5 +1,26 @@
 @import "tailwindcss";
 
+/* "Night training" theme: deep blue-black surfaces, electric lime→cyan gradients,
+   magenta→violet as the alert/energy accent. */
+@theme {
+  --color-night: #0b0f14;
+  --color-night-2: #121821;
+  --color-night-3: #1a222d;
+  --color-edge: #232c38;
+  --color-cloud: #eef2f6;
+  --color-mist: #a7b1bd;
+  --color-ash: #6b7580;
+  --color-lime: #a3e635;
+  --color-cyan: #22d3ee;
+  --color-magenta: #fb7185;
+  --color-violet: #a78bfa;
+  --color-amber: #fbbf24;
+  --color-ember: #fb923c;
+
+  --font-sans: "Archivo", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-grotesk: "Space Grotesk", "Archivo", ui-sans-serif, system-ui, sans-serif;
+}
+
 :root {
   color-scheme: dark;
 }
@@ -12,11 +33,35 @@ body,
 
 body {
   margin: 0;
-  background: #09090b;
-  color: #f4f4f5;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
-    "Helvetica Neue", Arial, sans-serif;
+  background: var(--color-night);
+  color: var(--color-cloud);
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+}
+
+/* Gradient utilities — the signature accents of the app. */
+.bg-grad-primary {
+  background-image: linear-gradient(100deg, #a3e635, #34d399 45%, #22d3ee);
+}
+.bg-grad-accent {
+  background-image: linear-gradient(100deg, #fb7185, #c084fc);
+}
+.text-grad {
+  background-image: linear-gradient(100deg, #a3e635, #22d3ee);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Data is the hero: every table cell gets tabular figures. */
+td,
+th {
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-lime);
+  outline-offset: 2px;
 }
 
 ::-webkit-scrollbar {
@@ -24,7 +69,7 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
+  background: #2c3540;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-track {
@@ -33,4 +78,13 @@ body {
 
 input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(0.7);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
 }

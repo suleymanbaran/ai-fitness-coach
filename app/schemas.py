@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from app.data_access.protocols import Category
 
@@ -34,6 +34,7 @@ class ProfileIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=120, examples=["Suleyman"])
     age: int | None = Field(None, ge=10, le=110)
     weight_kg: float | None = Field(None, gt=20, lt=400)
+    height_cm: float | None = Field(None, gt=80, lt=250, examples=[178])
     goal: Goal = "general_fitness"
 
 
@@ -102,6 +103,72 @@ class MeasurementIn(BaseModel):
         return self
 
 
+class MealItemIn(BaseModel):
+    """One food line of the Add-meal form: just a name and grams — nutrition is computed."""
+
+    name: str = Field(..., min_length=1, max_length=120, examples=["yulaf"])
+    grams: float = Field(..., gt=0, le=2000, examples=[50])
+
+
+class MealComputeIn(BaseModel):
+    items: list[MealItemIn] = Field(..., min_length=1, max_length=20)
+
+
+class ResolvedItemOut(BaseModel):
+    name: str
+    grams: float
+    kcal: float
+    protein_g: float
+    carbs_g: float
+    fat_g: float
+    fiber_g: float
+    source: str  # "fatsecret" | "estimate"
+
+
+class MealComputeOut(BaseModel):
+    items: list[ResolvedItemOut]
+    total_kcal: float
+    total_protein_g: float
+    total_carbs_g: float
+    total_fat_g: float
+    total_fiber_g: float
+
+
+class RunIn(BaseModel):
+    """A completed run. Pace and the Riegel 5k estimate are derived, not sent."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    day: date | None = Field(None, alias="date", description="Defaults to today")
+    distance_km: float = Field(..., gt=0, le=200, examples=[5.0])
+    duration_min: float = Field(..., gt=0, le=1200, examples=[27.5])
+    avg_hr_bpm: int | None = Field(None, ge=30, le=230, examples=[152])
+    notes: str | None = Field(None, max_length=300)
+
+
+class RunOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    date: date
+    distance_km: float
+    duration_min: float
+    avg_hr_bpm: int | None
+    source: str
+    notes: str | None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pace_min_per_km(self) -> float:
+        return round(self.duration_min / self.distance_km, 2)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def est_5k_min(self) -> float:
+        # Riegel's formula: T2 = T1 * (D2/D1)^1.06 — race-time prediction across distances.
+        return round(self.duration_min * (5.0 / self.distance_km) ** 1.06, 1)
+
+
 class LogFromTemplateIn(BaseModel):
     """Log a saved meal template; factor scales every item (0.5 = half portion, 1.5 = big hunger)."""
 
@@ -128,6 +195,7 @@ class SyncResultOut(BaseModel):
     days_updated: int
     error: str | None = None
     reconnect: bool = False
+    runs_new: int = 0
 
 
 class Source(BaseModel):

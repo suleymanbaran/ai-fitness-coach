@@ -78,6 +78,9 @@ class CoachAPI:
     def generate_program(self, user_id: str, kind: str, brief: str | None = None) -> dict:
         return self._request("POST", f"/users/{user_id}/programs/generate", json={"kind": kind, "brief": brief})
 
+    def plan_week(self, user_id: str, brief: str | None = None) -> dict:
+        return self._request("POST", f"/users/{user_id}/plans/weekly", json={"brief": brief})
+
     def activate_program(self, user_id: str, program_id: int) -> dict:
         return self._request("POST", f"/users/{user_id}/programs/{program_id}/activate")
 

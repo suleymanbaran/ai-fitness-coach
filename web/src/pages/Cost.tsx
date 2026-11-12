@@ -17,10 +17,10 @@ function costUsd(model: string, input: number, cached: number, output: number): 
   return (fresh * price[0] + cached * price[1] + output * price[2]) / 1_000_000;
 }
 
-const AXES = { stroke: "#52525b", fontSize: 11, tickLine: false, axisLine: false } as const;
+const AXES = { stroke: "#6b7580", fontSize: 11, tickLine: false, axisLine: false } as const;
 const TOOLTIP = {
-  contentStyle: { background: "#18181b", border: "1px solid #3f3f46", borderRadius: 12, fontSize: 12 },
-  labelStyle: { color: "#a1a1aa" },
+  contentStyle: { background: "#161c24", border: "1px solid #2c3540", borderRadius: 12, fontSize: 12 },
+  labelStyle: { color: "#a7b1bd" },
 } as const;
 
 export default function Cost({ userId }: { userId: string }) {
@@ -62,7 +62,7 @@ export default function Cost({ userId }: { userId: string }) {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-zinc-800 text-left text-xs uppercase tracking-wider text-zinc-500">
+              <tr className="border-b border-edge text-left text-xs font-medium text-mist">
                 <th className="py-2 pr-3">Model</th>
                 <th className="py-2 pr-3">Purpose</th>
                 <th className="py-2 pr-3 text-right">Calls</th>
@@ -72,14 +72,14 @@ export default function Cost({ userId }: { userId: string }) {
                 <th className="py-2 text-right">Est. cost</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-zinc-800/60">
+            <tbody className="divide-y divide-edge">
               {rows.map((r) => (
-                <tr key={`${r.model}-${r.purpose}`} className="text-zinc-300">
+                <tr key={`${r.model}-${r.purpose}`} className="text-cloud">
                   <td className="py-2 pr-3 font-mono text-xs">{r.model}</td>
                   <td className="py-2 pr-3">{r.purpose}</td>
                   <td className="py-2 pr-3 text-right">{r.calls}</td>
                   <td className="py-2 pr-3 text-right">{r.input_tokens.toLocaleString()}</td>
-                  <td className="py-2 pr-3 text-right text-lime-400">{r.cached_tokens.toLocaleString()}</td>
+                  <td className="py-2 pr-3 text-right text-lime">{r.cached_tokens.toLocaleString()}</td>
                   <td className="py-2 pr-3 text-right">{r.output_tokens.toLocaleString()}</td>
                   <td className="py-2 text-right font-medium">
                     ${costUsd(r.model, r.input_tokens, r.cached_tokens, r.output_tokens).toFixed(4)}
@@ -101,13 +101,13 @@ export default function Cost({ userId }: { userId: string }) {
                 fresh: Math.max(d.input_tokens - d.cached_tokens, 0),
               }))}
             >
-              <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
+              <CartesianGrid stroke="#2c3540" strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="day" {...AXES} />
               <YAxis {...AXES} width={50} />
-              <Tooltip {...TOOLTIP} cursor={{ fill: "#27272a55" }} />
+              <Tooltip {...TOOLTIP} cursor={{ fill: "rgba(163,230,53,0.05)" }} />
               <Legend wrapperStyle={{ fontSize: 12 }} />
               <Bar dataKey="cached" stackId="t" fill="#a3e635" radius={[0, 0, 0, 0]} />
-              <Bar dataKey="fresh" stackId="t" fill="#52525b" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="fresh" stackId="t" fill="#3a4450" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </Card>

@@ -4,10 +4,10 @@ import { api } from "../api";
 import { useFetch, todayISO } from "../hooks";
 import { Badge, Button, Card, Empty, ErrorNote, Input, PageHeader, Spinner } from "../components/ui";
 
-const AXES = { stroke: "#52525b", fontSize: 11, tickLine: false, axisLine: false } as const;
+const AXES = { stroke: "#6b7580", fontSize: 11, tickLine: false, axisLine: false } as const;
 const TOOLTIP = {
-  contentStyle: { background: "#18181b", border: "1px solid #3f3f46", borderRadius: 12, fontSize: 12 },
-  labelStyle: { color: "#a1a1aa" },
+  contentStyle: { background: "#161c24", border: "1px solid #2c3540", borderRadius: 12, fontSize: 12 },
+  labelStyle: { color: "#a7b1bd" },
 } as const;
 
 const FIELDS = [
@@ -67,13 +67,13 @@ export default function Measures({ userId }: { userId: string }) {
         <Card title="Weight & body fat (1 year)" className="mb-4">
           <ResponsiveContainer width="100%" height={240}>
             <LineChart data={chartRows}>
-              <CartesianGrid stroke="#27272a" strokeDasharray="3 3" vertical={false} />
+              <CartesianGrid stroke="#2c3540" strokeDasharray="3 3" vertical={false} />
               <XAxis dataKey="date" {...AXES} />
               <YAxis yAxisId="w" domain={["dataMin - 2", "dataMax + 2"]} {...AXES} width={40} />
               <YAxis yAxisId="bf" orientation="right" domain={["dataMin - 2", "dataMax + 2"]} {...AXES} width={36} />
               <Tooltip {...TOOLTIP} />
               <Line yAxisId="w" dataKey="Weight" stroke="#a3e635" strokeWidth={2} dot={{ r: 2 }} unit=" kg" />
-              <Line yAxisId="bf" dataKey="Body fat %" stroke="#38bdf8" strokeWidth={2} dot={{ r: 2 }} unit=" %" />
+              <Line yAxisId="bf" dataKey="Body fat %" stroke="#22d3ee" strokeWidth={2} dot={{ r: 2 }} unit=" %" />
             </LineChart>
           </ResponsiveContainer>
         </Card>
@@ -96,7 +96,7 @@ export default function Measures({ userId }: { userId: string }) {
               ))}
             </div>
             <Input placeholder="Notes (optional)" value={form.notes ?? ""} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
-            {error && <p className="text-sm text-red-400">{error}</p>}
+            {error && <p className="text-sm text-ember">{error}</p>}
             <Button type="submit" variant="primary" disabled={busy}>
               {busy ? "Saving..." : "Save measurement"}
             </Button>
@@ -110,7 +110,7 @@ export default function Measures({ userId }: { userId: string }) {
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="border-b border-zinc-800 text-left text-xs uppercase tracking-wider text-zinc-500">
+                  <tr className="border-b border-edge text-left text-xs font-medium text-mist">
                     <th className="py-2 pr-3">Date</th>
                     <th className="py-2 pr-3">Weight</th>
                     <th className="py-2 pr-3">BF %</th>
@@ -118,9 +118,9 @@ export default function Measures({ userId }: { userId: string }) {
                     <th className="py-2">Src</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-zinc-800/60">
+                <tbody className="divide-y divide-edge">
                   {[...rows].reverse().map((m) => (
-                    <tr key={m.date} className="text-zinc-300">
+                    <tr key={m.date} className="text-cloud">
                       <td className="py-2 pr-3">{m.date}</td>
                       <td className="py-2 pr-3 font-medium">{m.weight_kg ?? "—"}</td>
                       <td className="py-2 pr-3">{m.body_fat_pct ?? "—"}</td>

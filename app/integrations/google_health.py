@@ -113,11 +113,50 @@ class GoogleHealthClient:
             energy = self._daily_rollup(access_token, "active-energy-burned", start, end)
             for day, value in parse_active_energy_rollup(energy).items():
                 days.setdefault(day, {})["active_kcal"] = value
+            total = self._daily_rollup(access_token, "total-calories", start, end)
+            for day, value in parse_total_calories_rollup(total).items():
+                days.setdefault(day, {})["total_kcal"] = value
         except IntegrationError as exc:
             if "denied access" not in str(exc):
                 raise
 
         return {day: values for day, values in days.items() if start <= day <= end}
+
+    def fetch_exercises(self, access_token: str, start: date, end: date) -> list[dict]:
+        """Exercise-session dataPoints between `start` and `end` (local dates). The exercise
+        type accepts no server-side filter (400 INVALID_DATA_POINT_FILTER_DATA_TYPE_MEMBER),
+        so pages walk the newest-first list and stop once they pass `start`."""
+        points: list[dict] = []
+        params: dict = {"pageSize": 100}
+        while True:
+            response = request_with_retry(
+                self.http,
+                "GET",
+                f"{DATA_TYPES_URL}/exercise/dataPoints",
+                params=params,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if response.status_code == 401:
+                raise ReauthRequired("Google rejected the access token. Connect Google Health again.")
+            if response.status_code == 403:
+                raise IntegrationError("Google denied access to exercise. Approve all requested permissions.")
+            if response.is_error:
+                raise IntegrationError(f"Google Health exercise request failed ({response.status_code})")
+            body = response.json()
+            batch = body.get("dataPoints", [])
+            points.extend(batch)
+            token = body.get("nextPageToken")
+            if not token or not batch:
+                break
+            oldest = _interval_start_date((batch[-1].get("exercise") or {}).get("interval") or {})
+            if oldest is not None and oldest < start:
+                break
+            params = {"pageSize": 100, "pageToken": token}
+        return [
+            p for p in points
+            if (day := _interval_start_date((p.get("exercise") or {}).get("interval") or {})) is not None
+            and start <= day <= end
+        ]
 
     def _daily_rollup(self, access_token: str, data_type: str, start: date, end: date) -> list[dict]:
         """POST dataPoints:dailyRollUp — one aggregated point per civil day (newest first)."""
@@ -285,6 +324,82 @@ def _interval_end_date(interval: dict) -> date | None:
     return (moment + timedelta(seconds=offset_seconds)).date()
 
 
+def _interval_start_date(interval: dict) -> date | None:
+    """Local date an interval starts: startTime shifted by startUtcOffset."""
+    start_time = interval.get("startTime")
+    if not start_time:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    offset_seconds = 0.0
+    offset = interval.get("startUtcOffset") or ""
+    if str(offset).endswith("s"):
+        try:
+            offset_seconds = float(str(offset)[:-1])
+        except ValueError:
+            pass
+    return (moment + timedelta(seconds=offset_seconds)).date()
+
+
+def _duration_seconds(value: str | None) -> float | None:
+    """Google durations arrive as '1726s'."""
+    if not value or not str(value).endswith("s"):
+        return None
+    try:
+        return float(str(value)[:-1])
+    except ValueError:
+        return None
+
+
+RUN_TYPES = {"RUNNING", "TREADMILL", "TRAIL_RUNNING", "TRACK_AND_FIELD"}
+MAX_RUN_PACE_MIN_PER_KM = 10.0  # slower than this is a walk, not a run
+
+
+def parse_runs(points: list[dict]) -> list[dict]:
+    """Running sessions as run_log-ready dicts. Skips non-run exercise types, sessions
+    without distance, and walk-pace sessions (Fitbit labels treadmill walks as TREADMILL)."""
+    runs = []
+    for point in points:
+        exercise = point.get("exercise") or {}
+        if exercise.get("exerciseType") not in RUN_TYPES:
+            continue
+        interval = exercise.get("interval") or {}
+        day = _interval_start_date(interval)
+        if day is None:
+            continue
+        metrics = exercise.get("metricsSummary") or {}
+        millimeters = metrics.get("distanceMillimeters")
+        if not millimeters:
+            continue
+        distance_km = float(millimeters) / 1_000_000
+        if distance_km < 0.5:
+            continue
+        seconds = _duration_seconds(exercise.get("activeDuration"))
+        if seconds is None:
+            start_time = interval.get("startTime")
+            end_time = interval.get("endTime")
+            if not start_time or not end_time:
+                continue
+            seconds = (
+                datetime.fromisoformat(str(end_time).replace("Z", "+00:00"))
+                - datetime.fromisoformat(str(start_time).replace("Z", "+00:00"))
+            ).total_seconds()
+        duration_min = round(seconds / 60, 1)
+        if duration_min <= 0 or duration_min / distance_km > MAX_RUN_PACE_MIN_PER_KM:
+            continue
+        hr = metrics.get("averageHeartRateBeatsPerMinute")
+        runs.append({
+            "day": day,
+            "distance_km": round(distance_km, 2),
+            "duration_min": duration_min,
+            "avg_hr_bpm": int(hr) if hr else None,
+            "external_id": str(point.get("name", ""))[:200] or None,
+        })
+    return runs
+
+
 def _main_sleeps(points: list[dict]) -> dict[date, dict]:
     """The main sleep session per local end date (naps lose), with minutes and stage breakdown."""
     best: dict[date, tuple[bool, int, dict]] = {}
@@ -335,6 +450,17 @@ def parse_active_energy_rollup(points: list[dict]) -> dict[date, int]:
     result = {}
     for point in points:
         data = point.get("activeEnergyBurned") or {}
+        civil = (point.get("civilStartTime") or {}).get("date")
+        if civil and data.get("kcalSum") is not None:
+            result[_civil_date(civil)] = int(round(float(data["kcalSum"])))
+    return result
+
+
+def parse_total_calories_rollup(points: list[dict]) -> dict[date, int]:
+    """Total energy expenditure (BMR + activity, what the Fitbit app shows) per civil day."""
+    result = {}
+    for point in points:
+        data = point.get("totalCalories") or {}
         civil = (point.get("civilStartTime") or {}).get("date")
         if civil and data.get("kcalSum") is not None:
             result[_civil_date(civil)] = int(round(float(data["kcalSum"])))

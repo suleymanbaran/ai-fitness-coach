@@ -8,6 +8,7 @@ call never takes down the request.
 import json
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date
 
 from pydantic import ValidationError
@@ -18,6 +19,7 @@ from app.data_access.biometrics import upsert_daily_metrics
 from app.data_access.food import add_food_log, delete_food_log, get_food_log, list_food_logs, sync_day_calories
 from app.data_access.measurements import upsert_measurement
 from app.data_access.memory import delete_memory, upsert_memory
+from app.data_access.runs import add_run
 from app.data_access.templates import (
     MealTemplateItem,
     find_meal_template,
@@ -32,12 +34,20 @@ from app.integrations.common import IntegrationError
 from app.integrations.service import Integrations, get_account
 from app.programs.schemas import WorkoutIn
 from app.programs.service import (
+    ProgramGenerationError,
     add_workout,
     exercise_history as exercise_progression,
+    generate_weekly_plan,
+    get_active_program,
+    revise_program as revise_program_service,
     session_text,
     set_adjustment,
+    strength_summary as strength_summary_service,
 )
-from app.schemas import DayMetricsIn
+from app.rag.embeddings import Embedder
+from app.rag.generator import CoachClient
+from app.rag.vector_store import ProtocolStore
+from app.schemas import DayMetricsIn, RunIn
 
 MEALS = ("breakfast", "lunch", "dinner", "snack")
 
@@ -69,13 +79,14 @@ UPDATE_PROFILE_TOOL = {
     "type": "function",
     "name": "update_profile",
     "description": (
-        "Store static profile facts the user states (age, training goal). "
+        "Store static profile facts the user states (age, height in cm, training goal). "
         "For weight and body measurements use log_measurement instead."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "age": {"type": "integer", "minimum": 10, "maximum": 110},
+            "height_cm": {"type": "number", "minimum": 80, "maximum": 250},
             "goal": {
                 "type": "string",
                 "enum": ["strength", "muscle_gain", "fat_loss", "endurance", "general_fitness"],
@@ -241,6 +252,7 @@ LOG_WORKOUT_TOOL = {
                                     "reps": {"type": "integer"},
                                     "weight_kg": {"type": "number"},
                                     "rpe": {"type": "number"},
+                                    "rir": {"type": "integer", "description": "reps in reserve (RPE = 10 - RIR)"},
                                 },
                                 "required": [],
                                 "additionalProperties": False,
@@ -255,6 +267,29 @@ LOG_WORKOUT_TOOL = {
             "notes": {"type": "string"},
         },
         "required": ["session_name", "exercises"],
+        "additionalProperties": False,
+    },
+}
+
+
+LOG_RUN_TOOL = {
+    "type": "function",
+    "name": "log_run",
+    "description": (
+        "Log a completed run the user reports (distance, duration, average heart rate if given). "
+        "Use this whenever the user mentions running/jogging a distance — it feeds their cardio "
+        "capacity tracking (pace and HR trends, 5k estimate)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "date": {"type": "string", "description": "YYYY-MM-DD, defaults to today"},
+            "distance_km": {"type": "number", "description": "distance in kilometers"},
+            "duration_min": {"type": "number", "description": "total time in minutes (decimals ok, e.g. 27.5)"},
+            "avg_hr_bpm": {"type": "integer", "description": "average heart rate, if the user knows it"},
+            "notes": {"type": "string"},
+        },
+        "required": ["distance_km", "duration_min"],
         "additionalProperties": False,
     },
 }
@@ -399,6 +434,82 @@ GET_WORKOUT_TEMPLATE_TOOL = {
 }
 
 
+STRENGTH_SUMMARY_TOOL = {
+    "type": "function",
+    "name": "strength_summary",
+    "description": (
+        "Weekly training volume (sets, volume load), top estimated 1RM (Epley) and the all-time PR "
+        "for one exercise. Call it before prescribing loads (% of e1RM), judging whether weekly "
+        "sets are in the hypertrophy range, or answering 'how much can I lift / am I progressing'."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "exercise": {"type": "string", "description": "exercise name or part of it, e.g. 'bench'"},
+            "weeks": {"type": "integer", "description": "weeks to aggregate, default 8"},
+        },
+        "required": ["exercise"],
+        "additionalProperties": False,
+    },
+}
+
+
+REVISE_PROGRAM_TOOL = {
+    "type": "function",
+    "name": "revise_program",
+    "description": (
+        "Revise the user's ACTIVE training or nutrition program when they report they cannot "
+        "adhere to it or ask for a structural change (available days, equipment, disliked "
+        "exercises/foods, pain, schedule). Creates and activates the next version; old versions "
+        "are kept. For a one-off single-day change use adjust_session instead; also save durable "
+        "preferences with save_memory."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["training", "nutrition"]},
+            "feedback": {
+                "type": "string",
+                "description": "what does not work and what should change, in the user's words",
+            },
+        },
+        "required": ["feedback"],
+        "additionalProperties": False,
+    },
+}
+
+CREATE_WEEKLY_PLAN_TOOL = {
+    "type": "function",
+    "name": "create_weekly_plan",
+    "description": (
+        "Design and activate a NEW full weekly plan (training + cardio + nutrition) with the plan "
+        "model. Use this whenever the user asks for a weekly plan in chat — it is saved to their "
+        "web Plan page and calendar, so never just reply with a plan as text. Takes about a "
+        "minute. For changes to the CURRENT plan use revise_program instead."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "brief": {
+                "type": "string",
+                "description": "the user's wishes and constraints for this plan (days available, goal, injuries, food rules), summarized in their words",
+            },
+        },
+        "required": [],
+        "additionalProperties": False,
+    },
+}
+
+
+@dataclass(frozen=True)
+class PlanContext:
+    """Plan-tier dependencies needed by the revise_program / create_weekly_plan tools inside /ask."""
+
+    coach: CoachClient
+    embedder: Embedder
+    store: ProtocolStore
+
+
 def _slug(value: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")[:80]
     if not slug:
@@ -407,7 +518,11 @@ def _slug(value: str) -> str:
 
 
 def build_ask_tools(
-    db: Session, user_id: str, settings: Settings, integrations: Integrations | None = None
+    db: Session,
+    user_id: str,
+    settings: Settings,
+    integrations: Integrations | None = None,
+    plan_ctx: PlanContext | None = None,
 ) -> tuple[list[dict], dict[str, Callable[[dict], str]]]:
     def update_profile(args: dict) -> str:
         user = get_user(db, user_id)
@@ -418,11 +533,14 @@ def build_ask_tools(
             return "error: no profile fields provided"
         if "age" in fields and not 10 <= int(fields["age"]) <= 110:
             return "error: age must be between 10 and 110"
+        if "height_cm" in fields and not 80 <= float(fields["height_cm"]) <= 250:
+            return "error: height_cm must be between 80 and 250"
         upsert_user(
             db, user_id, name=user.name,
             age=int(fields["age"]) if "age" in fields else user.age,
             weight_kg=user.weight_kg,
             goal=fields.get("goal", user.goal),
+            height_cm=float(fields["height_cm"]) if "height_cm" in fields else user.height_cm,
         )
         db.commit()
         return f"profile updated: {', '.join(f'{k}={v}' for k, v in fields.items())}"
@@ -679,6 +797,27 @@ def build_ask_tools(
         ]
         return f"{template.name}:\n" + "\n".join(lines)
 
+    def strength_summary(args: dict) -> str:
+        name = str(args.get("exercise", "")).strip()
+        if not name:
+            return "error: exercise name is required"
+        weeks = min(max(int(args.get("weeks") or 8), 1), 52)
+        s = strength_summary_service(db, user_id, name, weeks)
+        if not s.weekly and s.pr_weight_kg is None:
+            return f"no logged history for {name!r} in the last {weeks} weeks"
+        lines = []
+        if s.pr_weight_kg is not None:
+            lines.append(
+                f"{s.exercise}: PR {s.pr_weight_kg:g} kg x {s.pr_reps} ({s.pr_date}), "
+                f"best est. 1RM {s.best_e1rm_kg} kg"
+            )
+        lines += [
+            f"- week of {w.week_start}: {w.sets} sets, volume {w.volume_kg:g} kg"
+            + (f", top e1RM {w.top_e1rm_kg:g} kg" if w.top_e1rm_kg is not None else "")
+            for w in s.weekly
+        ]
+        return "\n".join(lines)
+
     def get_today_session(args: dict) -> str:
         return session_text(db, user_id, date.today())
 
@@ -696,6 +835,52 @@ def build_ask_tools(
         if not exists:
             return f"cleared the adjustment for {day}; the original plan applies again"
         return f"adjusted {day}: {note.strip()[:120]}"
+
+    def revise_program(args: dict) -> str:
+        if plan_ctx is None:
+            return "error: program revision is not available in this context"
+        feedback = str(args.get("feedback") or "").strip()
+        if not feedback:
+            return "error: feedback is required"
+        kind = args.get("kind")
+        if kind not in ("training", "nutrition"):
+            active_kinds = [k for k in ("training", "nutrition") if get_active_program(db, user_id, k) is not None]
+            if len(active_kinds) == 1:
+                kind = active_kinds[0]
+            else:
+                return "error: specify kind ('training' or 'nutrition')"
+        program = get_active_program(db, user_id, kind)
+        if program is None:
+            return f"error: no active {kind} program to revise; generate one first"
+        user = get_user(db, user_id)
+        if user is None:
+            return "error: no profile found"
+        try:
+            revised = revise_program_service(
+                db, plan_ctx.coach, plan_ctx.embedder, plan_ctx.store, user, program, feedback, settings
+            )
+        except ProgramGenerationError:
+            return "error: revision failed schema validation twice; tell the user to try again in a moment"
+        return f"{kind} program revised to v{revised.version} and activated: {revised.summary[:240]}"
+
+    def create_weekly_plan(args: dict) -> str:
+        if plan_ctx is None:
+            return "error: weekly planning is not available in this context"
+        user = get_user(db, user_id)
+        if user is None:
+            return "error: no profile found"
+        brief = str(args.get("brief") or "").strip() or None
+        try:
+            training, nutrition = generate_weekly_plan(
+                db, plan_ctx.coach, plan_ctx.embedder, plan_ctx.store, user, brief, settings
+            )
+        except ProgramGenerationError:
+            return "error: plan generation failed validation twice; tell the user to try again in a moment"
+        return (
+            f"weekly plan created and activated — training v{training.version}, "
+            f"nutrition v{nutrition.version}; visible on the web Plan page and calendar. "
+            f"Training: {training.summary[:200]} | Nutrition: {nutrition.summary[:200]}"
+        )
 
     def log_workout(args: dict) -> str:
         day_str = args.get("date") or date.today().isoformat()
@@ -716,6 +901,33 @@ def build_ask_tools(
         )
         db.commit()
         return f"logged workout {day}: {workout.session_name} ({len(workout.exercises)} exercises)"
+
+    def log_run(args: dict) -> str:
+        day_str = args.get("date") or date.today().isoformat()
+        try:
+            day = date.fromisoformat(day_str)
+        except ValueError:
+            return f"error: invalid date {day_str!r}, expected YYYY-MM-DD"
+        if day > date.today():
+            return "error: cannot log a run for a future date"
+        try:
+            run = RunIn(**args)
+        except ValidationError as exc:
+            return f"error: invalid run: {exc.errors()[0]['msg']}"
+        add_run(
+            db, user_id, day,
+            distance_km=run.distance_km, duration_min=run.duration_min,
+            avg_hr_bpm=run.avg_hr_bpm, notes=run.notes, source="assistant",
+        )
+        db.commit()
+        pace = run.duration_min / run.distance_km
+        pace_str = f"{int(pace)}:{round((pace - int(pace)) * 60):02d}"
+        hr = f", avg HR {run.avg_hr_bpm}" if run.avg_hr_bpm else ""
+        est = run.duration_min * (5.0 / run.distance_km) ** 1.06
+        return (
+            f"run saved for {day}: {run.distance_km:g} km in {run.duration_min:g} min "
+            f"({pace_str}/km{hr}); Riegel 5k estimate {int(est)}:{round((est - int(est)) * 60):02d}"
+        )
 
     def exercise_history(args: dict) -> str:
         name = str(args.get("exercise", "")).strip()
@@ -753,14 +965,19 @@ def build_ask_tools(
         "get_workout_template": get_workout_template,
         "get_today_session": get_today_session,
         "log_workout": log_workout,
+        "log_run": log_run,
         "exercise_history": exercise_history,
+        "strength_summary": strength_summary,
         "adjust_session": adjust_session,
+        "revise_program": revise_program,
+        "create_weekly_plan": create_weekly_plan,
     }
     tools = [
         UPDATE_PROFILE_TOOL, LOG_MEASUREMENT_TOOL, SAVE_MEMORY_TOOL, FORGET_MEMORY_TOOL, LOG_DAY_TOOL,
         SEARCH_FOOD_TOOL, GET_FOOD_NUTRITION_TOOL, LOG_MEAL_TOOL, LIST_MEALS_TOOL, DELETE_MEAL_TOOL,
         SAVE_MEAL_TEMPLATE_TOOL, USE_MEAL_TEMPLATE_TOOL, GET_WORKOUT_TEMPLATE_TOOL,
-        GET_TODAY_SESSION_TOOL, LOG_WORKOUT_TOOL, EXERCISE_HISTORY_TOOL, ADJUST_SESSION_TOOL,
+        GET_TODAY_SESSION_TOOL, LOG_WORKOUT_TOOL, LOG_RUN_TOOL, EXERCISE_HISTORY_TOOL,
+        STRENGTH_SUMMARY_TOOL, ADJUST_SESSION_TOOL, REVISE_PROGRAM_TOOL, CREATE_WEEKLY_PLAN_TOOL,
     ]
     if settings.enable_web_search:
         tools.append(WEB_SEARCH_TOOL)
