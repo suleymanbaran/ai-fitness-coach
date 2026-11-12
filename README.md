@@ -1,10 +1,14 @@
 # Fitness RAG Coach
 
 An AI fitness coach that turns your daily HRV, sleep and resting heart rate into concrete training
-advice, grounded in vetted recovery and nutrition protocols and citing every source it uses.
+advice, grounded in vetted recovery and nutrition protocols and citing every source it uses. It
+remembers your preferences across conversations, designs and reviews your training and nutrition
+programs, logs meals and workouts from plain text, and runs ~$0.50-1.50/month on a two-tier OpenAI
+model router with prompt caching.
 
-**Stack:** Python, FastAPI, PostgreSQL (SQLAlchemy, Alembic), Qdrant, OpenAI (`text-embedding-3-small`,
-`gpt-4o-mini`), Streamlit, Docker, Caddy.
+**Stack:** Python, FastAPI, PostgreSQL (SQLAlchemy, Alembic), Qdrant, OpenAI Responses API
+(`text-embedding-3-small`, `gpt-6-luna`, `gpt-6.1-terra`), Streamlit (multipage), python-telegram-bot,
+Docker, Caddy.
 
 ![Dashboard: daily HRV, sleep, resting heart rate, calories, and the Google Health and FatSecret connect buttons](docs/dashboard.png)
 
@@ -20,9 +24,30 @@ and log days without connecting Google Health or FatSecret.
   with window functions, and puts the exact numbers in the prompt.
 - **Grounded answers:** retrieves the most relevant protocols from a vector database and instructs
   the model to answer only from them, cite them by ID, and flag medical red flags.
+- **Long-term memory:** durable preferences and facts ("no barbell squats — bad knee") are stored in
+  Postgres, injected into every prompt, and distilled automatically from each conversation. You can
+  browse, pin, edit and delete them in the UI or with `/memory` on Telegram.
+- **Acts, not just answers:** during a chat the coach calls tools to log metrics, search the
+  FatSecret food database, log meals (writing through to your real FatSecret diary when connected)
+  and log completed workouts. When FatSecret's US-only free database misses a food (simit, döner,
+  local Italian dishes), the coach falls back to OpenAI's built-in **web search** ($10/1k calls),
+  and only then to its own estimate — always telling you which source the number came from.
+- **Templates for the things you repeat:** save your usual breakfast as a *meal template* ("yulaflı
+  kahvaltı") and log it with one sentence or one click, optionally scaled ("1.5 porsiyon").
+  *Workout templates* (starter Push/Pull/Legs or your own) prefill the log form — with the weights
+  from your last session, so progressive overload is one edit away. Fiber is tracked per meal,
+  per template and per day alongside protein/carbs/fat.
+- **Programs:** generates training and nutrition programs on the plan-tier model with
+  schema-validated structured output, tracks adherence against your workout and food logs, and
+  reviews or regenerates them on demand.
+- **Chat anywhere, one memory:** conversation history is server-side, so the web UI and the Telegram
+  bot share the same conversation. The bot runs fully local via long polling — no public URL needed.
 - **Wearable and nutrition sync:** connects Fitbit data through the Google Health API (OAuth 2.0) and
   the FatSecret food diary (OAuth 1.0), with encrypted tokens, automatic refresh, retries and idempotent upserts.
   Google Health only accepts accounts listed as test users while the app is unverified.
+- **Budget by design:** two-tier model router (`gpt-6-luna` for chat at $0.10/M input,
+  `gpt-6.1-terra` for program design) with explicit 12h prompt-cache breakpoints on the stable
+  prefix (cached reads at $0.01/M). The Cost page shows real spend and cache-hit rate per call.
 - **Measured retrieval:** a labeled question set scores search with hit rate, recall and MRR at k.
 - **Production basics:** per-user token auth with object-level access checks, rate limiting on the
   LLM endpoint, upstream timeouts, request IDs in logs (no health data), Docker deployment behind HTTPS.
@@ -36,13 +61,18 @@ flowchart LR
   diary[FatSecret food diary] --> fatsecret[FatSecret API]
   google -->|"HRV, resting HR, sleep"| postgres
   fatsecret -->|calories| postgres
-  question[Question] --> embed[Embed]
+  web[Streamlit UI] --> api
+  tg[Telegram bot] -->|"HTTP + bearer token"| api
+  question[Question] --> api["/ask"]
+  api --> embed[Embed]
   embed --> qdrant["Qdrant: top-k protocols"]
-  userId[user_id] --> postgres["Postgres: daily metrics, 7-day baselines"]
-  qdrant --> prompt[Prompt]
-  postgres --> prompt
-  prompt --> llm[gpt-4o-mini]
-  llm --> answer["Answer + cited sources"]
+  api --> memory["Postgres: memories, chat history, metrics, programs, logs"]
+  qdrant --> prompt["Prompt: cached stable prefix + volatile context"]
+  memory --> prompt
+  prompt --> luna["gpt-6-luna (tools: log day/meal/workout, save memory, food search)"]
+  prompt --> terra["gpt-6.1-terra (program generation/review)"]
+  luna --> answer["Answer + cited sources"]
+  luna --> usage["llm_calls: tokens + cache hits"]
 ```
 
 ## Design decisions
@@ -51,6 +81,22 @@ flowchart LR
   Biometrics are exact numbers, queried in Postgres. Similarity search would blur the numbers.
 - **RAG instead of fine-tuning.** Metrics change daily and advice must trace back to a source.
   Updating knowledge means re-embedding a document, not retraining a model.
+- **Memory in Postgres, not a second vector DB.** One user accumulates tens of bounded preference
+  rows, not millions of documents: they all fit in the prompt, so every relevant memory is *always*
+  in context instead of relying on retrieval. A semantic memory collection stays an upgrade path.
+- **Prompt layout is a caching decision.** The stable prefix (system rules, profile, memories, active
+  program summary) changes at most daily and carries an explicit 12h cache breakpoint; volatile
+  content (today's metrics, retrieved protocols, the question) comes last. OpenAI needs ≥1,024 cached
+  tokens before a breakpoint pays for itself, so short prefixes skip it — writes cost 1.25x.
+- **Two model tiers.** Routine chat/logging/extraction runs on `gpt-6-luna` (cheap, fast); program
+  design and review runs on `gpt-6.1-terra` a few times a month. Extraction never overwrites a memory
+  the user stated themselves (`source="user"` rows are SQL-guarded).
+- **Programs are JSONB documents.** A plan is an LLM-generated artifact rendered by the UI and
+  diffed against logs as a whole; normalizing sessions and exercises into tables would add joins
+  without adding queries. One partial unique index enforces a single active program per kind.
+- **The Telegram bot is a thin API client.** It calls the same REST endpoints with the same bearer
+  token as the web UI, so auth, rate limits, history and memories behave identically on both, and
+  the bot runs as an independent long-polling process (no public URL, no webhook).
 - **Idempotent daily upserts.** One row per user per day with a unique constraint, so re-logging or a
   sync updates the day instead of duplicating it, and only overwrites the fields that were sent.
   Google and FatSecret can therefore fill the same day without erasing each other.
@@ -75,19 +121,25 @@ The knowledge base is small, so these numbers show the method works; they will d
 |---|---|
 | `data/protocols.json` | Unstructured knowledge, searched by meaning (vector DB) |
 | `data/users.json` | Two demo users, loaded into Postgres by `scripts/seed.py` |
-| `app/db/models.py` | SQLAlchemy tables: `users`, `daily_biometrics` (one row per user per day) |
-| `app/data_access/users.py` | Profile lookup with rolling 7-day baselines computed in SQL |
-| `app/data_access/biometrics.py` | Idempotent per-day upsert of metrics |
+| `app/db/models.py` | Tables: `users`, `daily_biometrics`, `integration_accounts`, `user_memories`, `chat_messages`, `llm_calls`, `food_logs`, `programs`, `workout_logs` |
+| `app/data_access/` | SQL layer: profiles with 7-day baselines, idempotent day upserts, memories, chat history, food logs, meal/workout templates, token usage |
 | `app/rag/embeddings.py` | Text to vectors (OpenAI embeddings) |
 | `app/rag/vector_store.py` | Qdrant collection: recreate, upsert, filtered search |
-| `app/rag/prompt.py` | System rules, computed baselines, retrieved protocols |
-| `app/rag/generator.py` | Chat completion call |
+| `app/rag/prompt.py` | Prompt split into cached stable prefix and volatile context |
+| `app/rag/generator.py` | `CoachClient`: Responses API, model router, prompt-cache breakpoints, tool loop |
+| `app/rag/tools.py` | Function tools: log day/meal/workout, search food, save/forget memory, today's session |
+| `app/rag/extraction.py` | Post-answer distillation of durable memories (structured output) |
 | `app/rag/demo.py` | Offline stand-ins for OpenAI (demo mode and tests) |
-| `app/main.py` | FastAPI app: `POST /ask`, `/users` endpoints |
+| `app/main.py` | FastAPI app: `/ask`, users, days, messages, memories, meals, intake, usage |
+| `app/programs/` | Program generation/activation/review, workout logs, their routes |
 | `app/integrations/` | Google Health and FatSecret clients, OAuth flows, token encryption, sync |
-| `ui/streamlit_app.py` | Chat UI with metrics and charts; calls the API over HTTP |
+| `app/telegram/` | Bot handlers + `CoachAPI` HTTP client (thin, stateless) |
+| `web/` | React tracking dashboard (Vite + Tailwind + Recharts); `npm run dev` proxies to the API |
+| `ui/streamlit_app.py` | Legacy Streamlit UI: metrics, charts, chat with server-side history |
+| `ui/pages/` | Streamlit Training, Nutrition, Memory and Cost pages |
 | `migrations/` | Alembic schema migrations |
 | `scripts/ingest.py` | Embed protocols and load them into Qdrant |
+| `scripts/telegram_bot.py` | Long-polling bot worker entry point |
 | `scripts/cosine_playground.py` | Brute-force cosine search in NumPy |
 
 ## Run locally
@@ -104,12 +156,21 @@ python -m scripts.seed              # optional: the two demo users
 python -m scripts.ingest            # embed protocols into Qdrant (needs the OpenAI key)
 ```
 
-Every time, in two terminals:
+Every time, in two (or three) terminals:
 
 ```bash
 uvicorn app.main:app --reload       # terminal 1: the API, docs at http://127.0.0.1:8000/docs
-streamlit run ui/streamlit_app.py   # terminal 2: the chat UI at http://localhost:8501
+cd web && npm run dev               # terminal 2: the React dashboard at http://localhost:5173
+python -m scripts.telegram_bot      # terminal 3 (optional): the Telegram bot, see below
 ```
+
+The dashboard (`web/`, Vite + React + Tailwind + Recharts, one-time `npm install`) is the main
+tracking UI: Today (calorie ring, metrics, planned session), Trends (weight/HRV/sleep/intake
+charts), Nutrition, Workouts (per-exercise **weight progression**: top weight, volume, set-by-set
+history), Measures (weight/body-fat/tape), Memory, Cost (LLM spend + cache-hit dashboard) and
+Settings (profile, provider connect/sync). Chat itself lives on Telegram. The dev server proxies
+API paths to `:8000`, so no CORS setup is needed. The older Streamlit UI (`streamlit run
+ui/streamlit_app.py`) still works and keeps the chat page.
 
 ```bash
 curl -X POST localhost:8000/ask -H 'Content-Type: application/json' \
@@ -128,6 +189,19 @@ In the UI sidebar, open **New profile** to create yourself. Then either connect 
 (next section) or type a day under **Log a day** (HRV, sleep score, time asleep, resting HR, calories;
 any subset). Re-logging a day only overwrites the fields you fill in.
 The coach compares your latest day with the previous 7 days, and the UI warns when today is not logged yet.
+
+Everything else happens in plain conversation, on the web or on Telegram — the coach has tools for it:
+
+- "Slept 6h, HRV 52, log it" → writes today's `daily_biometrics`.
+- "I had 2 eggs and a simit for breakfast" → searches FatSecret (or estimates when the food isn't in
+  the US database), writes a `food_logs` entry, updates the day's calorie total, and mirrors the meal
+  into your real FatSecret diary when connected.
+- "Remember that I only have dumbbells at home" → stores a durable memory shown on the **Memory** page.
+- "I did bench 5x5 at 80kg" → writes a `workout_logs` entry.
+
+Training and nutrition programs are generated on the **Training** / **Nutrition** pages (or with
+`/plan` on Telegram), reviewed against your adherence there, and the active program's summary is part
+of the coach's cached context in every later conversation.
 
 The same over HTTP:
 
@@ -153,10 +227,10 @@ app on fatsecret.com can sync a diary, once the project's consumer key is config
 
 | | Google Health API | FatSecret Platform API |
 |---|---|---|
-| What we read | `daily-heart-rate-variability` (RMSSD, ms), `daily-resting-heart-rate` (bpm), `sleep` (`minutesAsleep` of the main sleep) | `food_entries.get.v2`: the day's diary entries, summed to kcal |
-| Where it lands | `hrv_ms`, `resting_hr_bpm`, `sleep_minutes` | `calories_kcal` |
+| What we use | `daily-heart-rate-variability` (RMSSD, ms), `daily-resting-heart-rate` (bpm), `sleep` (`minutesAsleep` of the main sleep), `weight` + `body-fat` (scale or manual weigh-ins) | `food_entries.get.v2` (diary, summed to kcal), `foods.search` v1 + `food.get` v6 (food lookup for the coach's tools), `food_entry.create` (coach-logged meals land in your real diary) |
+| Where it lands | `hrv_ms`, `resting_hr_bpm`, `sleep_minutes`; `body_measurements` (a new weight also refreshes the profile) | `calories_kcal`, `food_logs` |
 | Login | Google OAuth 2.0, read-only scopes, refresh token | 3-legged OAuth 1.0 (HMAC-SHA1). FatSecret's OAuth 2.0 cannot act for a user |
-| Endpoint | `GET https://health.googleapis.com/v4/users/me/dataTypes/{type}/dataPoints` | `GET https://platform.fatsecret.com/rest/food-entries/v2` |
+| Endpoint | `GET https://health.googleapis.com/v4/users/me/dataTypes/{type}/dataPoints` | `https://platform.fatsecret.com/rest/...` |
 | Code | `app/integrations/google_health.py` | `app/integrations/fatsecret.py` |
 
 Google has no Fitbit sleep *score*, so synced sleep is stored as hours asleep. A day with a nap and a
@@ -192,11 +266,20 @@ pressed again weekly until the app is verified.
 
 **3. FatSecret.** Register an app at [platform.fatsecret.com](https://platform.fatsecret.com) and copy
 the OAuth 1.0 **Consumer Key** and **Consumer Secret** into `.env` as `FATSECRET_CONSUMER_KEY` and
-`FATSECRET_CONSUMER_SECRET`. Two limits from FatSecret's side:
+`FATSECRET_CONSUMER_SECRET`. What the free **Basic** key gives you (verified against FatSecret's
+edition table — diary reads/writes and food search are *not* Premier-only):
 
-- The app may only accept calls from IP addresses you allowlist.
-- `food_entries.get` is marked Premier-only. On a free key, sync returns FatSecret's error instead of
-  calories; HRV, heart rate and sleep from Google still sync.
+- 5,000 API calls/day, **US food database, English only**. Foods from other countries often aren't
+  found by search; the coach then falls back to web search or estimates calories from general
+  knowledge and logs them with `source="assistant"` (the diary sync still reports what you logged
+  in the FatSecret app itself, which has the full local database).
+- Food **search and nutrition lookup work with the consumer key alone** — you do not need to
+  connect (OAuth) your diary for the coach to look foods up. Connecting only adds diary read and
+  write-through of coach-logged meals.
+- `foods.search` v6, autocomplete and barcode scanning are Premier. Students qualify for
+  **Premier Free** (verification required); once granted, set `FATSECRET_PREMIER=true` and search
+  upgrades to v6 with no code change.
+- The app may only accept calls from IP addresses you allowlist in the FatSecret console.
 
 The connect flow is FatSecret's [3-legged OAuth](https://platform.fatsecret.com/docs/guides/authentication/oauth1/three-legged):
 request token, you approve on fatsecret.com, then the callback at
@@ -211,6 +294,50 @@ python -m scripts.sync --user-id me --days 14     # same thing from the terminal
 
 The production stack runs `scripts.sync` every 3 hours. `POST /users/{id}/sync?days=14` does one sync
 over HTTP and returns, per provider, how many days changed or why it failed.
+
+## Chat from Telegram
+
+The bot is a separate long-polling process (`python -m scripts.telegram_bot`) that calls the same
+REST API as the web UI with a normal bearer token — no webhook, no public URL, works fully local.
+Conversation history lives in Postgres, so a question asked on Telegram shows up in the web chat and
+the coach's memory is shared.
+
+Setup (one time):
+
+1. Create a bot with [@BotFather](https://t.me/BotFather) → `TELEGRAM_BOT_TOKEN`.
+2. Get your numeric chat id (e.g. from [@userinfobot](https://t.me/userinfobot)) →
+   `TELEGRAM_ALLOWED_CHAT_ID`. The bot refuses to start without it and serves *only* that chat;
+   anyone else gets "Not authorized".
+3. Issue an API token for the bound profile: `python -m scripts.issue_token me` → `TELEGRAM_API_TOKEN`,
+   and set `TELEGRAM_BOUND_USER_ID=me` (default).
+
+Then run `python -m scripts.telegram_bot` (locally) or enable the `bot` service in
+`docker-compose.prod.yml`. On macOS you can install it as a launchd agent so it starts at login and
+restarts on crashes: put a plist with `RunAtLoad`/`KeepAlive` running the command above (working
+directory = repo root) in `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$UID <plist>`.
+Plain text goes to the coach (including logging via its tools); commands:
+`/today`, `/meals`, `/workout`, `/plan [training|nutrition] [brief]`, `/review [regenerate]`,
+`/sync`, `/memory`, `/forget <kind> <key>`, `/start`.
+
+## Models and costs
+
+| Task | Model | Price per 1M tokens (in / cached / out) |
+|---|---|---|
+| Chat, tool calls, memory extraction | `gpt-6-luna` | $0.10 / $0.01 / $0.50 |
+| Program generation and review | `gpt-6.1-terra` | $1.00 / $0.05 / $5.00 |
+| Embeddings | `text-embedding-3-small` | $0.02 |
+| Web search fallback (built-in tool) | — | $10 per 1,000 searches ($0.01 each) |
+
+Prompt caching (OpenAI Responses API): the stable prefix — system rules, your profile, memories and
+the active program summary — carries an explicit breakpoint with a 12h TTL (writes cost 1.25x, reads
+0.1x), and the growing session is covered by an implicit 30m breakpoint. The prefix must reach
+1,024 tokens before a breakpoint pays off, so short prefixes skip it. Every call is recorded in
+`llm_calls` (model, purpose, input/cached/output tokens); the **Cost** page turns that into estimated
+spend and cache-hit rate. At personal volume (dozens of questions a day) expect roughly
+**$0.50-1.50/month**. Swap models via `FAST_MODEL` / `PLAN_MODEL` in `.env`.
+
+Note: Gemini's free tier was evaluated and rejected for this use case — its free tier trains on your
+content (health data) and gates context caching behind the paid tier.
 
 ## Check retrieval quality
 
@@ -227,14 +354,15 @@ only when the score says retrieval is weak. Current scores are in [Results](#res
 
 ## Going live (only when you need it off this machine)
 
-`docker-compose.prod.yml` runs Postgres, Qdrant, the API and the UI on a private network, with
-[Caddy](https://caddyserver.com) in front serving the UI over HTTPS. Only ports 80/443 are exposed.
+`docker-compose.prod.yml` runs Postgres, Qdrant, the API, the UI and the Telegram bot on a private
+network, with [Caddy](https://caddyserver.com) in front serving the UI over HTTPS. Only ports 80/443
+are exposed; the bot talks to Telegram outbound via long polling and needs no port at all.
 Each deploy runs `alembic upgrade head` and `scripts.ingest` before the API starts.
 
 On a server with Docker and a domain whose DNS points at it:
 
 ```bash
-cp .env.prod.example .env.prod      # set DOMAIN, POSTGRES_PASSWORD, OPENAI_API_KEY
+cp .env.prod.example .env.prod      # set DOMAIN, POSTGRES_PASSWORD, OPENAI_API_KEY (+ TELEGRAM_* for the bot)
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 docker compose -f docker-compose.prod.yml --env-file .env.prod exec api \
   python -m scripts.issue_token me --name "Suleyman"     # prints your access token once
@@ -245,6 +373,8 @@ Open `https://<DOMAIN>` and sign in with the token. In production:
 - Register `https://<DOMAIN>/integrations/google/callback` as the Google redirect URI, and put the
   same provider credentials plus `TOKEN_ENCRYPTION_KEY` in `.env.prod`. Caddy forwards only the
   `/integrations/*/callback` paths to the API; a `sync` service pulls the last 3 days every 3 hours.
+- The `bot` service runs the Telegram worker against `http://api:8000` with `TELEGRAM_API_TOKEN`;
+  it serves only `TELEGRAM_ALLOWED_CHAT_ID` and refuses to start without it.
 - `AUTH_ENABLED=true`: every `/users` and `/ask` call needs `Authorization: Bearer <token>` and can
   only read or change the token owner's data (401 without a valid token, 403 for someone else's).
 - `/ask` is limited to `ASK_RATE_LIMIT_PER_MINUTE` per user (429 with `Retry-After`).
@@ -262,5 +392,9 @@ python -m pytest -q
 ```
 
 Tests use a separate `fitness_coach_test` database (created automatically, every test rolled back),
-an in-memory Qdrant, and fake embedder, generator and provider APIs, so they need no API key and
-never call Google, FatSecret or OpenAI.
+an in-memory Qdrant, and fake embedder, coach and provider APIs (`tests/fakes.py`, `app/rag/demo.py`,
+`httpx.MockTransport`), so they need no API key and never call Google, FatSecret, Telegram or OpenAI.
+Coverage spans the API and auth matrix, the CoachClient request/cache/tool-loop shape against a fake
+Responses API, memory eviction and extraction guards, FatSecret search/diary-write signing and
+parsing, program generation/retry/activation/adherence, and the Telegram layer (client, chunking,
+authorization, handlers). Streamlit pages render headlessly via `streamlit.testing.v1.AppTest`.
