@@ -10,13 +10,14 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.auth import RateLimiter, get_ask_limiter
+from app.config import Settings, get_settings
 from app.db.models import Base
 from app.db.session import get_db
-from app.main import app, get_embedder, get_generator, get_store
+from app.main import app, get_coach, get_embedder, get_store
 from app.rag.ingestion import ingest_protocols
 from app.rag.vector_store import ProtocolStore
 from scripts.seed import seed_demo_users
-from tests.fakes import FakeEmbedder, FakeGenerator
+from tests.fakes import FakeCoach, FakeEmbedder
 
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL", "postgresql+psycopg://postgres:postgres@localhost:5432/fitness_coach_test"
@@ -63,19 +64,21 @@ def db_session(test_engine: Engine) -> Iterator[Session]:
 @pytest.fixture
 def fakes(db_session: Session) -> Iterator[SimpleNamespace]:
     embedder = FakeEmbedder()
-    generator = FakeGenerator()
+    coach = FakeCoach()
     store = ProtocolStore(QdrantClient(":memory:"), "protocols")
     ingest_protocols(embedder, store)
 
     limiter = RateLimiter()
     overrides = {
         get_embedder: lambda: embedder,
-        get_generator: lambda: generator,
+        get_coach: lambda: coach,
         get_store: lambda: store,
         get_ask_limiter: lambda: limiter,
+        # Hermetic defaults: a developer's real .env (e.g. DEMO_MODE=true) must not change test behavior.
+        get_settings: lambda: Settings(_env_file=None),
     }
     app.dependency_overrides.update(overrides)
     # No `with TestClient(...)`: the lifespan (real OpenAI and on-disk Qdrant) is skipped.
-    yield SimpleNamespace(client=TestClient(app), generator=generator, store=store, db=db_session)
+    yield SimpleNamespace(client=TestClient(app), coach=coach, store=store, db=db_session)
     for dependency in overrides:
         app.dependency_overrides.pop(dependency, None)

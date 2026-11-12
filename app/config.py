@@ -1,5 +1,6 @@
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,8 +9,20 @@ class Settings(BaseSettings):
 
     demo_mode: bool = False
     openai_api_key: str = ""
-    chat_model: str = "gpt-4o-mini"
+    # Two-tier router: fast model for chat/logging/extraction, plan model for program generation.
+    fast_model: str = "gpt-6-luna"
+    plan_model: str = "gpt-6.1-terra"
     embedding_model: str = "text-embedding-3-small"
+    # Explicit 12h breakpoint on the stable prefix + implicit 30m session caching (Responses API).
+    enable_prompt_caching: bool = True
+    cache_ttl_stable: str = "12h"
+    cache_ttl_session: str = "30m"
+    chat_history_turns: int = 8
+    memory_max_entries: int = 40
+    tool_max_iterations: int = 6
+    # Built-in OpenAI web_search tool ($10/1k calls): used when FatSecret has no match,
+    # e.g. local dishes missing from its US-only free database.
+    enable_web_search: bool = True
 
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/fitness_coach"
 
@@ -34,6 +47,23 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     fatsecret_consumer_key: str = ""
     fatsecret_consumer_secret: str = ""
+    # Premier unlocks foods.search v6 (better relevance); Basic keys must leave this false.
+    fatsecret_premier: bool = False
+
+    # Telegram bot (long-polling worker; no public URL needed). The bot serves exactly one
+    # Telegram chat and maps it to one coach profile. TELEGRAM_API_TOKEN comes from
+    # `python -m scripts.issue_token <bound-user-id>`.
+    telegram_bot_token: str = ""
+    telegram_api_token: str = ""
+    telegram_api_url: str = "http://localhost:8000"
+    telegram_bound_user_id: str = "me"
+    telegram_allowed_chat_id: int | None = None
+
+    @field_validator("telegram_allowed_chat_id", mode="before")
+    @classmethod
+    def empty_str_is_none(cls, value):
+        # An empty TELEGRAM_ALLOWED_CHAT_ID= line in .env must not break startup.
+        return None if value == "" else value
 
 
 @lru_cache

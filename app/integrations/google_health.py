@@ -17,6 +17,7 @@ DATA_TYPES_URL = "https://health.googleapis.com/v4/users/me/dataTypes"
 SCOPES = [
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
     "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+    "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
 ]
 
 
@@ -99,6 +100,76 @@ class GoogleHealthClient:
             days.setdefault(day, {})["resting_hr_bpm"] = value
         for day, value in parse_sleep_minutes(sleep).items():
             days.setdefault(day, {})["sleep_minutes"] = value
+        for day, value in parse_sleep_stages(sleep).items():
+            days.setdefault(day, {})["sleep_stages"] = value
+
+        # Steps and active energy need the activity_and_fitness scope; users who connected
+        # before that scope existed get a 403 here — degrade to the other metrics instead of
+        # failing the whole sync.
+        try:
+            steps = self._daily_rollup(access_token, "steps", start, end)
+            for day, value in parse_steps_rollup(steps).items():
+                days.setdefault(day, {})["steps"] = value
+            energy = self._daily_rollup(access_token, "active-energy-burned", start, end)
+            for day, value in parse_active_energy_rollup(energy).items():
+                days.setdefault(day, {})["active_kcal"] = value
+        except IntegrationError as exc:
+            if "denied access" not in str(exc):
+                raise
+
+        return {day: values for day, values in days.items() if start <= day <= end}
+
+    def _daily_rollup(self, access_token: str, data_type: str, start: date, end: date) -> list[dict]:
+        """POST dataPoints:dailyRollUp — one aggregated point per civil day (newest first)."""
+
+        def civil(day: date) -> dict:
+            return {"date": {"year": day.year, "month": day.month, "day": day.day}, "time": {"hours": 0, "minutes": 0, "seconds": 0}}
+
+        points: list[dict] = []
+        body: dict = {
+            "range": {"start": civil(start), "end": civil(end + timedelta(days=1))},
+            "windowSizeDays": 1,
+        }
+        while True:
+            response = request_with_retry(
+                self.http,
+                "POST",
+                f"{DATA_TYPES_URL}/{data_type}/dataPoints:dailyRollUp",
+                json=body,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if response.status_code == 401:
+                raise ReauthRequired("Google rejected the access token. Connect Google Health again.")
+            if response.status_code == 403:
+                raise IntegrationError(f"Google denied access to {data_type}. Approve all requested permissions.")
+            if response.is_error:
+                raise IntegrationError(f"Google Health {data_type} rollup failed ({response.status_code})")
+            payload = response.json()
+            points.extend(payload.get("rollupDataPoints", []))
+            if not payload.get("nextPageToken"):
+                return points
+            body = {**body, "pageToken": payload["nextPageToken"]}
+
+    def fetch_measurements(self, access_token: str, start: date, end: date) -> dict[date, dict]:
+        """Weight and body-fat samples per day (latest sample of each day wins).
+
+        Only populated when the user weighs in via a Fitbit scale or the Fitbit/Google Health app;
+        the band itself does not measure weight.
+        """
+        after = (end + timedelta(days=1)).isoformat()
+        weight = self._list(
+            access_token, "weight", f'weight.sample_time.civil_time >= "{start}" AND weight.sample_time.civil_time < "{after}"'
+        )
+        body_fat = self._list(
+            access_token,
+            "body-fat",
+            f'body_fat.sample_time.civil_time >= "{start}" AND body_fat.sample_time.civil_time < "{after}"',
+        )
+        days: dict[date, dict] = {}
+        for day, value in parse_weight(weight).items():
+            days.setdefault(day, {})["weight_kg"] = value
+        for day, value in parse_body_fat(body_fat).items():
+            days.setdefault(day, {})["body_fat_pct"] = value
         return {day: values for day, values in days.items() if start <= day <= end}
 
     def _list(self, access_token: str, data_type: str, filter_expr: str) -> list[dict]:
@@ -129,6 +200,49 @@ def _civil_date(value: dict) -> date:
     return date(value["year"], value["month"], value["day"])
 
 
+def _sample_date(sample_time: dict) -> date | None:
+    """Local date of a Sample-type data point: civil time when present, else the UTC date."""
+    civil = sample_time.get("civilTime") or {}
+    if civil.get("date"):
+        return _civil_date(civil["date"])
+    physical = sample_time.get("physicalTime")
+    if physical:
+        return date.fromisoformat(physical[:10])
+    return None
+
+
+def parse_weight(points: list[dict]) -> dict[date, float]:
+    """Kilograms per local date; the latest sample of a day wins."""
+    best: dict[date, tuple[str, float]] = {}
+    for point in points:
+        data = point.get("weight") or {}
+        grams = data.get("weightGrams")
+        sample_time = data.get("sampleTime") or {}
+        day = _sample_date(sample_time)
+        if day is None or grams is None:
+            continue
+        when = sample_time.get("physicalTime") or ""
+        if day not in best or when >= best[day][0]:
+            best[day] = (when, round(float(grams) / 1000, 1))
+    return {day: kg for day, (_, kg) in best.items()}
+
+
+def parse_body_fat(points: list[dict]) -> dict[date, float]:
+    """Body-fat percentage per local date; the latest sample of a day wins."""
+    best: dict[date, tuple[str, float]] = {}
+    for point in points:
+        data = point.get("bodyFat") or {}
+        percentage = data.get("percentage")
+        sample_time = data.get("sampleTime") or {}
+        day = _sample_date(sample_time)
+        if day is None or percentage is None:
+            continue
+        when = sample_time.get("physicalTime") or ""
+        if day not in best or when >= best[day][0]:
+            best[day] = (when, round(float(percentage), 1))
+    return {day: pct for day, (_, pct) in best.items()}
+
+
 def parse_daily_hrv(points: list[dict]) -> dict[date, float]:
     result = {}
     for point in points:
@@ -148,19 +262,80 @@ def parse_resting_hr(points: list[dict]) -> dict[date, int]:
     return result
 
 
-def parse_sleep_minutes(points: list[dict]) -> dict[date, int]:
-    """Minutes asleep in the main sleep of each night, keyed by the local date the sleep ended."""
-    best: dict[date, tuple[bool, int]] = {}
+def _interval_end_date(interval: dict) -> date | None:
+    """Local date an interval ends. Real responses carry endTime + endUtcOffset;
+    civilEndTime is documented but not actually returned — support both."""
+    civil = interval.get("civilEndTime") or {}
+    if civil.get("date"):
+        return _civil_date(civil["date"])
+    end_time = interval.get("endTime")
+    if not end_time:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(end_time).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    offset_seconds = 0.0
+    offset = interval.get("endUtcOffset") or ""
+    if str(offset).endswith("s"):
+        try:
+            offset_seconds = float(str(offset)[:-1])
+        except ValueError:
+            pass
+    return (moment + timedelta(seconds=offset_seconds)).date()
+
+
+def _main_sleeps(points: list[dict]) -> dict[date, dict]:
+    """The main sleep session per local end date (naps lose), with minutes and stage breakdown."""
+    best: dict[date, tuple[bool, int, dict]] = {}
     for point in points:
         sleep = point.get("sleep") or {}
-        minutes = (sleep.get("summary") or {}).get("minutesAsleep")
-        interval = sleep.get("interval") or {}
-        if minutes is None or "civilEndTime" not in interval:
-            continue  # still processing, or no local time available
-        day = _civil_date(interval["civilEndTime"]["date"])
+        summary = sleep.get("summary") or {}
+        minutes = summary.get("minutesAsleep")
+        day = _interval_end_date(sleep.get("interval") or {})
+        if minutes is None or day is None:
+            continue  # still processing, or no usable time available
         is_main = bool((sleep.get("metadata") or {}).get("mainSleep"))
         candidate = (is_main, int(minutes))
-        # Prefer the session Google marks as main sleep; otherwise the longest one. Naps lose.
-        if day not in best or candidate > best[day]:
-            best[day] = candidate
-    return {day: minutes for day, (_, minutes) in best.items()}
+        if day in best and candidate <= best[day][:2]:
+            continue
+        stages = {
+            str(stage.get("type", "")).lower(): int(stage["minutes"])
+            for stage in summary.get("stagesSummary") or []
+            if stage.get("type") and stage.get("minutes") is not None
+        }
+        best[day] = (is_main, int(minutes), stages)
+    return {day: {"minutes": minutes, "stages": stages} for day, (_, minutes, stages) in best.items()}
+
+
+def parse_sleep_minutes(points: list[dict]) -> dict[date, int]:
+    """Minutes asleep in the main sleep of each night, keyed by the local date the sleep ended."""
+    return {day: values["minutes"] for day, values in _main_sleeps(points).items()}
+
+
+def parse_sleep_stages(points: list[dict]) -> dict[date, dict]:
+    """Stage minutes (deep/rem/light/awake) of each night's main sleep, when Fitbit reported them."""
+    return {day: values["stages"] for day, values in _main_sleeps(points).items() if values["stages"]}
+
+
+def parse_steps_rollup(points: list[dict]) -> dict[date, int]:
+    """Steps per civil day from dailyRollUp. Unworn days omit the field and are skipped;
+    a worn-but-idle day reports countSum "0" and is stored as a real zero."""
+    result = {}
+    for point in points:
+        data = point.get("steps") or {}
+        civil = (point.get("civilStartTime") or {}).get("date")
+        if civil and data.get("countSum") is not None:
+            result[_civil_date(civil)] = int(data["countSum"])
+    return result
+
+
+def parse_active_energy_rollup(points: list[dict]) -> dict[date, int]:
+    """Active (exercise) kilocalories burned per civil day from dailyRollUp."""
+    result = {}
+    for point in points:
+        data = point.get("activeEnergyBurned") or {}
+        civil = (point.get("civilStartTime") or {}).get("date")
+        if civil and data.get("kcalSum") is not None:
+            result[_civil_date(civil)] = int(round(float(data["kcalSum"])))
+    return result

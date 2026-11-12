@@ -1,5 +1,4 @@
 from datetime import date, timedelta
-from types import SimpleNamespace
 
 import httpx
 from fastapi.testclient import TestClient
@@ -8,8 +7,7 @@ from qdrant_client import QdrantClient
 
 from app.config import get_settings
 from app.main import app, get_store
-from app.rag.demo import PromptEchoGenerator
-from app.rag.generator import Generator
+from app.rag.demo import DemoCoach
 from app.rag.vector_store import ProtocolStore
 
 
@@ -23,20 +21,35 @@ def test_ask_returns_answer_and_ranked_sources(fakes):
     assert r.status_code == 200
     body = r.json()
     assert body["answer"] == "Fake answer [rec-hrv-autoregulation]"
+    assert body["cached_tokens"] == 40
     assert len(body["sources"]) == 3
     scores = [s["score"] for s in body["sources"]]
     assert scores == sorted(scores, reverse=True)
     assert body["sources"][0]["protocol_id"] == "rec-hrv-autoregulation"
 
 
-def test_prompt_contains_user_metrics_and_retrieved_protocols(fakes):
+def test_prompt_splits_stable_prefix_from_volatile_context(fakes):
     fakes.client.post("/ask", json={"user_id": "u1", "question": "My HRV dropped, should I train legs?"})
 
-    system, user = fakes.generator.last_messages
-    assert system["role"] == "system"
-    assert "HRV 55.0 ms vs 66.5 ms (-17.3%)" in user["content"]
-    assert "[rec-hrv-autoregulation]" in user["content"]
-    assert user["content"].endswith("Question: My HRV dropped, should I train legs?")
+    call = fakes.coach.answer_call
+    # Stable prefix: rules + profile + memories block. Volatile: metrics + protocols + question.
+    assert "long-term memory" in call.stable
+    assert "User: Ali" in call.stable
+    assert "<memories>" in call.stable
+    assert "HRV 55.0 ms vs 66.5 ms (-17.3%)" in call.volatile
+    assert "[rec-hrv-autoregulation]" in call.volatile
+    assert call.volatile.endswith("Question: My HRV dropped, should I train legs?")
+    # Today's metrics must NOT leak into the cached prefix or every request misses the cache.
+    assert "HRV 55.0" not in call.stable
+    assert call.kwargs["cache_key"] == "coach:u1"
+    function_tools = {t["name"] for t in call.kwargs["tools"] if t["type"] == "function"}
+    assert function_tools == {
+        "update_profile", "log_measurement", "save_memory", "forget_memory", "log_day",
+        "search_food", "get_food_nutrition", "log_meal", "list_meals", "delete_meal",
+        "save_meal_template", "use_meal_template", "get_workout_template",
+        "get_today_session", "log_workout", "exercise_history", "adjust_session",
+    }
+    assert {"type": "web_search"} in call.kwargs["tools"]
 
 
 def test_category_filter_restricts_sources(fakes):
@@ -68,13 +81,26 @@ def test_empty_knowledge_base_returns_503(fakes):
 
 
 def test_openai_failure_returns_502(fakes, monkeypatch):
-    def fail(messages):
-        raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/chat/completions"))
+    def fail(*args, **kwargs):
+        raise APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
 
-    monkeypatch.setattr(fakes.generator, "generate", fail)
+    monkeypatch.setattr(fakes.coach, "complete", fail)
     r = fakes.client.post("/ask", json={"user_id": "u1", "question": "Hello coach"})
     assert r.status_code == 502
     assert r.json()["detail"] == "The AI service failed. Try again in a moment."
+
+
+def test_workout_history_reaches_the_prompt(fakes):
+    fakes.client.post("/users/u1/workouts", json={
+        "session_name": "Upper A",
+        "exercises": [{"name": "Bench press", "sets": [{"reps": 6, "weight_kg": 80, "rpe": 7}]}],
+        "duration_min": 50,
+    })
+    fakes.client.post("/ask", json={"user_id": "u1", "question": "What should I train today?"})
+
+    volatile = fakes.coach.answer_call.volatile
+    assert "Workout history (last 14 days" in volatile
+    assert "Upper A (50 min): Bench press (6 reps, @ 80 kg, rpe 7)" in volatile
 
 
 def test_users_list_and_detail(fakes):
@@ -105,9 +131,9 @@ def test_create_profile_and_log_days(fakes):
     assert (r.json()["hrv_ms"], r.json()["calories_kcal"]) == (56, 2400)
 
     fakes.client.post("/ask", json={"user_id": "me", "question": "Should I train hard today?"})
-    _, user = fakes.generator.last_messages
-    assert f"Today ({today}) compared with the previous 1-day baseline" in user["content"]
-    assert "HRV 56.0 ms vs 70.0 ms (-20.0%)" in user["content"]
+    volatile = fakes.coach.answer_call.volatile
+    assert f"Today ({today}) compared with the previous 1-day baseline" in volatile
+    assert "HRV 56.0 ms vs 70.0 ms (-20.0%)" in volatile
 
 
 def test_profile_update_keeps_logged_days(fakes):
@@ -141,23 +167,7 @@ def test_demo_mode_runs_full_app_without_openai(monkeypatch, db_session):
     assert len(r.json()["sources"]) == 3
 
 
-def test_prompt_echo_generator_shows_last_message():
-    answer = PromptEchoGenerator().generate([{"role": "system", "content": "rules"}, {"role": "user", "content": "data"}])
-    assert "```text\ndata\n```" in answer
-    assert "rules" not in answer
-
-
-def test_generator_reads_message_content_from_openai_response():
-    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="Rest today."))])
-    calls = {}
-
-    def create(**kwargs):
-        calls.update(kwargs)
-        return response
-
-    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-    generator = Generator(client, model="gpt-4o-mini")
-
-    assert generator.generate([{"role": "user", "content": "hi"}]) == "Rest today."
-    assert calls["model"] == "gpt-4o-mini"
-    assert calls["temperature"] == 0.2
+def test_demo_coach_echoes_prompt_parts():
+    reply = DemoCoach().complete("rules and memories", [], "metrics and question")
+    assert "```text\nrules and memories\n\nmetrics and question\n```" in reply.text
+    assert reply.usage.input_tokens == 0

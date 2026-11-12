@@ -17,6 +17,9 @@ class DailyMetrics(BaseModel):
     sleep_minutes: int | None = None
     resting_hr_bpm: int | None = None
     calories_kcal: int | None = None
+    steps: int | None = None
+    active_kcal: int | None = None
+    sleep_stages: dict | None = None  # {"deep": min, "rem": min, "light": min, "awake": min}
     # Averages over the previous BASELINE_DAYS days, excluding this day. Computed in SQL.
     hrv_baseline_ms: float | None = None
     sleep_baseline: float | None = None
@@ -39,7 +42,7 @@ def _rolling_avg(column):
     return func.avg(column).over(order_by=DailyBiometrics.date, rows=(-BASELINE_DAYS, -1))
 
 
-def get_user_days(db: Session, user_id: str) -> list[DailyMetrics]:
+def get_user_days(db: Session, user_id: str, limit: int = HISTORY_DAYS) -> list[DailyMetrics]:
     stmt = (
         select(
             DailyBiometrics.date,
@@ -48,6 +51,9 @@ def get_user_days(db: Session, user_id: str) -> list[DailyMetrics]:
             DailyBiometrics.sleep_minutes,
             DailyBiometrics.resting_hr_bpm,
             DailyBiometrics.calories_kcal,
+            DailyBiometrics.steps,
+            DailyBiometrics.active_kcal,
+            DailyBiometrics.sleep_stages,
             _rolling_avg(DailyBiometrics.hrv_ms).label("hrv_baseline_ms"),
             _rolling_avg(DailyBiometrics.sleep_score).label("sleep_baseline"),
             _rolling_avg(DailyBiometrics.sleep_minutes).label("sleep_minutes_baseline"),
@@ -58,7 +64,7 @@ def get_user_days(db: Session, user_id: str) -> list[DailyMetrics]:
         .order_by(DailyBiometrics.date)
     )
     rows = db.execute(stmt).mappings().all()
-    return [DailyMetrics.model_validate(dict(row)) for row in rows[-HISTORY_DAYS:]]
+    return [DailyMetrics.model_validate(dict(row)) for row in rows[-limit:]]
 
 
 def get_user(db: Session, user_id: str) -> UserProfile | None:

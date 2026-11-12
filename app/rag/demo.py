@@ -5,6 +5,8 @@ import re
 
 import numpy as np
 
+from app.rag.generator import LLMReply, LLMUsage
+
 HASH_DIM = 256
 
 
@@ -23,14 +25,15 @@ class HashingEmbedder:
         return (vector / norm if norm else vector).tolist()
 
 
-class PromptEchoGenerator:
-    """Instead of calling GPT, returns the exact prompt GPT would have received."""
+class DemoCoach:
+    """Instead of calling an LLM, returns the exact prompt it would have received.
+    Matches the CoachClient.complete duck type; never invokes tools."""
 
-    def generate(self, messages: list[dict]) -> str:
-        user_message = messages[-1]["content"]
-        return (
+    def complete(self, stable: str, history: list[dict], volatile: str, **kwargs) -> LLMReply:
+        text = (
             "**Demo mode:** no OpenAI key is configured, so this is not a real AI answer. "
-            "Below is exactly what would be sent to GPT: the user's computed metrics, "
-            "the retrieved protocols, and the question.\n\n"
-            f"```text\n{user_message}\n```"
+            "Below is exactly what would be sent to the model: the cached instruction prefix, "
+            "then the user's computed metrics, the retrieved protocols, and the question.\n\n"
+            f"```text\n{stable}\n\n{volatile}\n```"
         )
+        return LLMReply(text=text, usage=LLMUsage.zero("demo"))

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.data_access.biometrics import upsert_daily_metrics
+from app.data_access.measurements import upsert_measurement
 from app.db.models import IntegrationAccount
 from app.integrations.common import IntegrationError, ReauthRequired, TokenCipher
 from app.integrations.fatsecret import FatSecretClient
@@ -63,7 +64,9 @@ def build_integrations(settings: Settings) -> Integrations:
             settings.google_client_id, settings.google_client_secret, f"{api}/integrations/google/callback"
         )
     if settings.fatsecret_consumer_key and settings.fatsecret_consumer_secret:
-        fatsecret = FatSecretClient(settings.fatsecret_consumer_key, settings.fatsecret_consumer_secret)
+        fatsecret = FatSecretClient(
+            settings.fatsecret_consumer_key, settings.fatsecret_consumer_secret, premier=settings.fatsecret_premier
+        )
     cipher = TokenCipher(settings.token_encryption_key) if settings.token_encryption_key else None
     return Integrations(cipher=cipher, google=google, fatsecret=fatsecret, public_api_url=api)
 
@@ -152,11 +155,14 @@ def sync_user(db: Session, integrations: Integrations, user_id: str, days: int) 
             continue
         try:
             metrics = _fetch(account, integrations, start, end)
+            measurements = _fetch_measurements(account, integrations, start, end)
             for day, values in metrics.items():
                 upsert_daily_metrics(db, user_id, day, source=account.provider, **values)
+            for day, values in measurements.items():
+                upsert_measurement(db, user_id, day, source=account.provider, **values)
             account.last_synced_at = datetime.now(UTC)
             account.last_error = None
-            results.append(SyncResult(account.provider, len(metrics)))
+            results.append(SyncResult(account.provider, len(set(metrics) | set(measurements))))
         except IntegrationError as exc:
             account.last_error = str(exc)[:300]
             results.append(SyncResult(account.provider, 0, str(exc), reconnect=isinstance(exc, ReauthRequired)))
@@ -165,16 +171,31 @@ def sync_user(db: Session, integrations: Integrations, user_id: str, days: int) 
 
 
 def _fetch(account: IntegrationAccount, integrations: Integrations, start: date, end: date) -> dict[date, dict]:
-    cipher = integrations.cipher
     if account.provider == "google":
-        if account.expires_at is None or account.expires_at <= datetime.now(UTC) + timedelta(minutes=1):
-            if not account.refresh_token_enc:
-                raise ReauthRequired("Google login expired. Connect Google Health again.")
-            tokens = integrations.google.refresh(cipher.decrypt(account.refresh_token_enc))
-            account.access_token_enc = cipher.encrypt(tokens.access_token)
-            account.refresh_token_enc = cipher.encrypt(tokens.refresh_token)
-            account.expires_at = tokens.expires_at
-        return integrations.google.fetch_days(cipher.decrypt(account.access_token_enc), start, end)
+        return integrations.google.fetch_days(_google_access_token(account, integrations), start, end)
+    cipher = integrations.cipher
     return integrations.fatsecret.fetch_days(
         cipher.decrypt(account.access_token_enc), cipher.decrypt(account.token_secret_enc), start, end
     )
+
+
+def _fetch_measurements(
+    account: IntegrationAccount, integrations: Integrations, start: date, end: date
+) -> dict[date, dict]:
+    """Weight/body-fat samples; only Google provides them (Fitbit scale or manual weigh-in)."""
+    if account.provider != "google":
+        return {}
+    return integrations.google.fetch_measurements(_google_access_token(account, integrations), start, end)
+
+
+def _google_access_token(account: IntegrationAccount, integrations: Integrations) -> str:
+    """The account's access token, refreshing it first when it is about to expire."""
+    cipher = integrations.cipher
+    if account.expires_at is None or account.expires_at <= datetime.now(UTC) + timedelta(minutes=1):
+        if not account.refresh_token_enc:
+            raise ReauthRequired("Google login expired. Connect Google Health again.")
+        tokens = integrations.google.refresh(cipher.decrypt(account.refresh_token_enc))
+        account.access_token_enc = cipher.encrypt(tokens.access_token)
+        account.refresh_token_enc = cipher.encrypt(tokens.refresh_token)
+        account.expires_at = tokens.expires_at
+    return cipher.decrypt(account.access_token_enc)
