@@ -11,3 +11,6 @@ qdrant_data/
 nohup.out
 web/node_modules/
 web/dist/
+
+# Qwen Code local settings
+.qwen/
