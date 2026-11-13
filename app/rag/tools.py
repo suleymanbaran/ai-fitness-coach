@@ -424,7 +424,7 @@ GET_WORKOUT_TEMPLATE_TOOL = {
     "description": (
         "Show the user's workout templates (default exercises, sets, reps). Without a name it lists "
         "all of them; with a name it shows that template's exercises. Use when the user says e.g. "
-        "'push day yapacağım' — then log the workout with log_workout as they complete it."
+        "'what am I doing on push day?' — then log the workout with log_workout as they complete it."
     ),
     "parameters": {
         "type": "object",

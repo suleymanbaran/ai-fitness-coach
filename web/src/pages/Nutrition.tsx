@@ -120,7 +120,7 @@ function TemplateEditor({
   return (
     <form onSubmit={save} className="space-y-3 border-t border-edge pt-4">
       <div className="grid gap-3 sm:grid-cols-[1fr_160px]">
-        <Input required placeholder="Template name (Yulaflı kahvaltı)" value={name} onChange={(e) => setName(e.target.value)} />
+        <Input required placeholder="Template name (Oats breakfast)" value={name} onChange={(e) => setName(e.target.value)} />
         <Select value={meal} onChange={(e) => setMeal(e.target.value)}>
           {["breakfast", "lunch", "dinner", "snack"].map((m) => (
             <option key={m} value={m}>
@@ -143,7 +143,7 @@ function TemplateEditor({
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="P" value={item.protein_g} onChange={(e) => set(index, { protein_g: e.target.value })} />
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="C" value={item.carbs_g} onChange={(e) => set(index, { carbs_g: e.target.value })} />
           <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="F" value={item.fat_g} onChange={(e) => set(index, { fat_g: e.target.value })} />
-          <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="Lif" value={item.fiber_g} onChange={(e) => set(index, { fiber_g: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="Fiber" value={item.fiber_g} onChange={(e) => set(index, { fiber_g: e.target.value })} />
           <button
             type="button"
             className="text-ash hover:text-ember sm:col-span-1"
@@ -210,7 +210,7 @@ function MealTemplates({ userId }: { userId: string }) {
       ) : !templates.data?.length ? (
         <Empty>
           No templates yet. Save your usual breakfast once — logging it later takes one click (or one
-          message to the coach: "her zamanki kahvaltıdan").
+          message to the coach: "my usual breakfast").
         </Empty>
       ) : (
         <ul className="space-y-2">
@@ -415,7 +415,7 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
           {items.map((item, i) => (
             <div key={i} className="flex items-center gap-2">
               <Input
-                placeholder="Food name (yulaf, whey, fıstık ezmesi...)"
+                placeholder="Food name (oats, whey, peanut butter...)"
                 value={item.name}
                 onChange={(e) => patch(i, { name: e.target.value })}
                 className="flex-1"
@@ -612,7 +612,7 @@ export default function Nutrition({ userId }: { userId: string }) {
                         {m.protein_g != null && <span>P {m.protein_g}g</span>}
                         {m.carbs_g != null && <span>C {m.carbs_g}g</span>}
                         {m.fat_g != null && <span>F {m.fat_g}g</span>}
-                        {m.fiber_g != null && <span>Lif {m.fiber_g}g</span>}
+                        {m.fiber_g != null && <span>Fiber {m.fiber_g}g</span>}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-3">
@@ -662,7 +662,7 @@ export default function Nutrition({ userId }: { userId: string }) {
             <MessageCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan" />
             {nutritionProgram
               ? "Targets come from your Telegram plan — numbers only, no menus. Ask the coach \"ne yemeliyim?\" when you want meal ideas."
-              : "No active plan yet. Ask the coach on Telegram (\"bana haftalık plan yap\") and your daily kcal/macro/fiber/salt targets appear up top."}
+              : "No active plan yet. Ask the coach on Telegram (\"make me a weekly plan\") and your daily kcal/macro/fiber/salt targets appear up top."}
           </p>
         </div>
       </div>

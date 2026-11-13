@@ -453,7 +453,7 @@ function TemplatesCard({ userId }: { userId: string }) {
       {!templates.data?.length ? (
         <Empty>
           No templates yet. "Load starter templates" adds Push/Pull/Legs; or create your own. The coach
-          on Telegram knows them too — ask "push day'de ne yapacağım?".
+          on Telegram knows them too — ask "what am I doing on push day?".
         </Empty>
       ) : (
         <ul className="space-y-2">

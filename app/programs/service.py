@@ -188,7 +188,7 @@ Requirements:
 - training.weeks[0] must lay out 7 CONSECUTIVE days starting from the plan's start date: if the
   user's brief names a start date, use exactly that date; otherwise start TOMORROW — do NOT snap
   to next Monday. Each day's `name` must carry the real weekday and calendar date plus its number
-  counting 1..7 from the start, in the user's language, e.g. "Perşembe 13 Kasım — 1. gün". Each
+  counting 1..7 from the start, in the user's language, e.g. "Thursday 13 Nov — day 1". Each
   day gets a day_type (strength / cardio / mixed / rest). Include 1-3 dedicated or appended cardio
   sessions with modality, duration and intensity in the cardio field (zone 2 for recovery/fat loss,
   intervals only when recovery supports it).

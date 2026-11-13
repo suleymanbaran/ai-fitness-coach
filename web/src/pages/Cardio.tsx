@@ -78,7 +78,7 @@ function LogRunForm({ userId, onLogged }: { userId: string; onLogged: () => void
         </form>
       ) : (
         <p className="text-sm text-mist">
-          Or just tell the coach: "dün 5 km koştum, 27 dakika, nabız 152" — on Telegram or the chat, it
+          Or just tell the coach: "ran 5k yesterday in 27 minutes, heart rate 152" — on Telegram or the chat, it
           lands here automatically.
         </p>
       )}
@@ -123,7 +123,7 @@ export default function Cardio({ userId }: { userId: string }) {
       <Card title="Pace and heart rate">
         {list.length === 0 ? (
           <Empty>
-            No runs yet. Log one below or tell the coach "5 km koştum 28 dakikada" on Telegram.
+            No runs yet. Log one below or tell the coach "ran 5k in 28 minutes" on Telegram.
           </Empty>
         ) : (
           <ResponsiveContainer width="100%" height={260}>
@@ -208,8 +208,8 @@ export default function Cardio({ userId }: { userId: string }) {
       </Card>
 
       <p className="flex items-center gap-1.5 text-xs text-ash">
-        <HeartPulse className="h-3.5 w-3.5" /> The coach sees these runs too — ask "kardiyovasküler
-        gelişimim nasıl?" on Telegram for a pace-vs-HR analysis.
+        <HeartPulse className="h-3.5 w-3.5" /> The coach sees these runs too — ask "how is my
+        cardiovascular progress?" on Telegram for a pace-vs-HR analysis.
       </p>
     </div>
   );

@@ -63,8 +63,8 @@ function WeeklyGrid({ program, nutrition }: { program: Program; nutrition?: Prog
                     {kcal.toLocaleString()} kcal
                   </div>
                   <div className="mt-0.5 text-[10px] tabular-nums text-mist">
-                    P {num("protein_g") ?? "—"} · C {num("carbs_g") ?? "—"} · Y {num("fat_g") ?? "—"}
-                    {num("fiber_g") != null && ` · Lif ${num("fiber_g")}`}
+                    P {num("protein_g") ?? "—"} · C {num("carbs_g") ?? "—"} · F {num("fat_g") ?? "—"}
+                    {num("fiber_g") != null && ` · Fiber ${num("fiber_g")}`}
                   </div>
                   <div className="mt-1 flex items-center gap-1 text-[10px] tabular-nums text-mist">
                     <Footprints className="h-3 w-3 text-cyan" />
@@ -153,7 +153,7 @@ export default function Plan({ userId }: { userId: string }) {
           <MessageCircle className="mt-0.5 h-4 w-4 shrink-0 text-cyan" />
           <span>
             Ask the coach for a plan — send <code className="rounded bg-white/5 px-1">/plan</code> or just say
-            "bana haftalık plan yap, 4 gün, diz dostu". It designs all 7 days (strength + cardio +
+            "make me a weekly plan, 4 days, knee-friendly". It designs all 7 days (strength + cardio +
             numeric nutrition targets), activates them, and the plan shows up here and on the
             calendar automatically. Changes: tell the coach in chat, or use Revise below.
           </span>
