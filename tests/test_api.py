@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.main import app, get_store
 from app.rag.demo import DemoCoach
 from app.rag.vector_store import ProtocolStore
+from scripts.seed import day_metrics
 
 
 def test_health(fakes):
@@ -36,11 +37,15 @@ def test_prompt_splits_stable_prefix_from_volatile_context(fakes):
     assert "long-term memory" in call.stable
     assert "User: Ali" in call.stable
     assert "<memories>" in call.stable
-    assert "HRV 55.0 ms vs 66.5 ms (-17.3%)" in call.volatile
+    # Seeded days are generated relative to today, so derive the expected value from the same
+    # generator rather than freezing a number that goes stale.
+    today_hrv = day_metrics("u1", "strength", 0)["hrv_ms"]
+    assert f"HRV {today_hrv} ms vs " in call.volatile
+    assert "compared with the previous 6-day baseline" in call.volatile
     assert "[rec-hrv-autoregulation]" in call.volatile
     assert call.volatile.endswith("Question: My HRV dropped, should I train legs?")
     # Today's metrics must NOT leak into the cached prefix or every request misses the cache.
-    assert "HRV 55.0" not in call.stable
+    assert f"HRV {today_hrv}" not in call.stable
     assert call.kwargs["cache_key"] == "coach:u1"
     function_tools = {t["name"] for t in call.kwargs["tools"] if t["type"] == "function"}
     assert function_tools == {
@@ -175,7 +180,7 @@ def test_demo_mode_runs_full_app_without_openai(monkeypatch, db_session):
 
     assert r.status_code == 200
     assert r.json()["answer"].startswith("**Demo mode:**")
-    assert "HRV 55.0 ms vs 66.5 ms" in r.json()["answer"]
+    assert f"HRV {day_metrics('u1', 'strength', 0)['hrv_ms']} ms vs " in r.json()["answer"]
     assert len(r.json()["sources"]) == 3
 
 
