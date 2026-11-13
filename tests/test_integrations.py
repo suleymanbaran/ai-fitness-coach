@@ -355,15 +355,17 @@ def test_parse_sleep_handles_utc_offset_and_midnight_crossing():
         # Real shape: 23:30Z + 1h offset ends 00:30 local the NEXT day.
         {"sleep": {"interval": {"endTime": "2026-11-12T23:30:00Z", "endUtcOffset": "3600s"},
                    "metadata": {"mainSleep": True}, "summary": {"minutesAsleep": "420"}}},
-        # Documented shape: civilEndTime wins when present.
-        {"sleep": {"interval": {"civilEndTime": {"date": civil(TODAY)}, "endTime": "2020-01-01T00:00:00Z"},
+        # Documented shape: civilEndTime wins when present. Pinned to a fixed date so it can
+        # never collide with the local date derived from the point above.
+        {"sleep": {"interval": {"civilEndTime": {"date": civil(date(2026, 11, 20))},
+                                "endTime": "2020-01-01T00:00:00Z"},
                    "metadata": {"mainSleep": True}, "summary": {"minutesAsleep": "400"}}},
         # No usable time: skipped.
         {"sleep": {"metadata": {"mainSleep": True}, "summary": {"minutesAsleep": "100"}}},
     ]
     parsed = parse_sleep_minutes(points)
     assert parsed[date(2026, 11, 13)] == 420
-    assert parsed[TODAY] == 400
+    assert parsed[date(2026, 11, 20)] == 400
     assert len(parsed) == 2
 
 
