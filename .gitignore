@@ -14,3 +14,6 @@ web/dist/
 
 # Qwen Code local settings
 .qwen/
+
+# Local-only reference material, not part of the project
+docs/AI_Engineer_Study_Guide.pdf
