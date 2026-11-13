@@ -1,6 +1,6 @@
 # AI Fitness Coach
 
-[![Tests](https://github.com/suleymanbaran/fitness-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/suleymanbaran/fitness-rag-assistant/actions/workflows/ci.yml)
+[![Tests](https://github.com/suleymanbaran/ai-fitness-coach/actions/workflows/ci.yml/badge.svg)](https://github.com/suleymanbaran/ai-fitness-coach/actions/workflows/ci.yml)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
