@@ -1,5 +1,9 @@
 # Fitness RAG Coach
 
+[![Tests](https://github.com/suleymanbaran/fitness-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/suleymanbaran/fitness-rag-assistant/actions/workflows/ci.yml)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 An AI fitness coach that turns your daily HRV, sleep and resting heart rate into concrete training
 advice, grounded in vetted recovery and nutrition protocols and citing every source it uses. It
 remembers your preferences across conversations, designs and reviews your training and nutrition
@@ -7,8 +11,14 @@ programs, logs meals and workouts from plain text, and runs ~$0.50-1.50/month on
 model router with prompt caching.
 
 **Stack:** Python, FastAPI, PostgreSQL (SQLAlchemy, Alembic), Qdrant, OpenAI Responses API
-(`text-embedding-3-small`, `gpt-6-luna`, `gpt-6.1-terra`), Streamlit (multipage), python-telegram-bot,
-Docker, Caddy.
+(`text-embedding-3-small`, `gpt-6-luna`, `gpt-6.1-terra`), React + TypeScript (Vite, Tailwind,
+Recharts), python-telegram-bot, Streamlit (legacy), Docker, Caddy.
+
+**By the numbers:** 139 tests green in CI with no API key (the LLM and embedder are faked) ·
+retrieval MRR 0.94 on a 26-question labeled eval · ~$0.50-1.50/month per user via a two-tier model
+router and 12h prompt caching · 14 Postgres tables, ~50 REST endpoints, 2 OAuth integrations
+(Google Health, FatSecret) · one server-side conversation shared by the React dashboard and the
+Telegram bot.
 
 ![Dashboard: daily HRV, sleep, resting heart rate, calories, and the Google Health and FatSecret connect buttons](docs/dashboard.png)
 
@@ -135,7 +145,7 @@ The knowledge base is small, so these numbers show the method works; they will d
 |---|---|
 | `data/protocols.json` | Unstructured knowledge, searched by meaning (vector DB) |
 | `data/users.json` | Two demo users, loaded into Postgres by `scripts/seed.py` |
-| `app/db/models.py` | Tables: `users`, `daily_biometrics`, `integration_accounts`, `user_memories`, `chat_messages`, `llm_calls`, `food_logs`, `programs`, `workout_logs` |
+| `app/db/models.py` | 14 tables: `users`, `daily_biometrics`, `integration_accounts`, `user_memories`, `chat_messages`, `food_logs`, `body_measurements`, `meal_templates`, `workout_templates`, `session_adjustments`, `llm_calls`, `programs`, `workout_logs`, `run_logs` |
 | `app/data_access/` | SQL layer: profiles with 7-day baselines, idempotent day upserts, memories, chat history, food logs, meal/workout templates, token usage |
 | `app/rag/embeddings.py` | Text to vectors (OpenAI embeddings) |
 | `app/rag/vector_store.py` | Qdrant collection: recreate, upsert, filtered search |
@@ -155,6 +165,8 @@ The knowledge base is small, so these numbers show the method works; they will d
 | `scripts/ingest.py` | Embed protocols and load them into Qdrant |
 | `scripts/telegram_bot.py` | Long-polling bot worker entry point |
 | `scripts/cosine_playground.py` | Brute-force cosine search in NumPy |
+| `tests/` | 139 pytest tests over 13 modules (API, auth, coach, food, memory, nutrition, programs, runs, measurements, templates, integrations, Telegram, evaluation). LLM and embedder are faked, Postgres is real, Qdrant runs in-memory — no API key needed. |
+| `.github/workflows/ci.yml` | Runs the suite on every push and PR against a Postgres 16 service container |
 
 ## Run locally
 
@@ -421,3 +433,7 @@ Coverage spans the API and auth matrix, the CoachClient request/cache/tool-loop 
 Responses API, memory eviction and extraction guards, FatSecret search/diary-write signing and
 parsing, program generation/retry/activation/adherence, and the Telegram layer (client, chunking,
 authorization, handlers). Streamlit pages render headlessly via `streamlit.testing.v1.AppTest`.
+
+CI (`.github/workflows/ci.yml`) runs this same suite on every push and pull request against a
+Postgres 16 service container, and fails the run if any test was skipped — the suite skips itself
+when Postgres is unreachable, and a green run that tested nothing is worse than a red one.
