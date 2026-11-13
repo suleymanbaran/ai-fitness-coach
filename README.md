@@ -1,4 +1,4 @@
-# Fitness RAG Coach
+# AI Fitness Coach
 
 [![Tests](https://github.com/suleymanbaran/fitness-rag-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/suleymanbaran/fitness-rag-assistant/actions/workflows/ci.yml)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
@@ -20,13 +20,16 @@ router and 12h prompt caching · 14 Postgres tables, ~50 REST endpoints, 2 OAuth
 (Google Health, FatSecret) · one server-side conversation shared by the React dashboard and the
 Telegram bot.
 
-![Dashboard: daily HRV, sleep, resting heart rate, calories, and the Google Health and FatSecret connect buttons](docs/dashboard.png)
+![Today: HRV, resting heart rate, sleep and steps against a rolling baseline, energy balance, today's session from the active program, and logged meals](docs/dashboard.png)
 
-![Coach answer to "Should I run today?", citing the protocols it used](docs/chat.png)
+![Weekly plan: seven LLM-designed days with strength sessions, cardio prescriptions and numeric nutrition targets](docs/plan.png)
 
-These screenshots are the seeded demo profile. Google Health is in Testing mode, so only Google
-accounts on the project's test-user list can connect a Fitbit. Anyone can ask the coach questions
-and log days without connecting Google Health or FatSecret.
+![Strength progression: per-exercise top weight, estimated 1RM, PRs and weekly volume load](docs/strength.png)
+
+These screenshots are the demo profile created by `python -m scripts.seed --rich` — entirely
+fictional data, generated relative to today's date so the dashboard is never empty. Google Health
+is in Testing mode, so only Google accounts on the project's test-user list can connect a Fitbit.
+Anyone can ask the coach questions and log days without connecting Google Health or FatSecret.
 
 ## What it does
 
@@ -42,8 +45,8 @@ and log days without connecting Google Health or FatSecret.
   and log completed workouts. When FatSecret's US-only free database misses a food (simit, döner,
   local Italian dishes), the coach falls back to OpenAI's built-in **web search** ($10/1k calls),
   and only then to its own estimate — always telling you which source the number came from.
-- **Templates for the things you repeat:** save your usual breakfast as a *meal template* ("yulaflı
-  kahvaltı") and log it with one sentence or one click, optionally scaled ("1.5 porsiyon").
+- **Templates for the things you repeat:** save your usual breakfast as a *meal template* ("oats
+  breakfast") and log it with one sentence or one click, optionally scaled ("1.5 servings").
   *Workout templates* (starter Push/Pull/Legs or your own) prefill the log form — with the weights
   from your last session, so progressive overload is one edit away. Fiber is tracked per meal,
   per template and per day alongside protein/carbs/fat. The web **Add meal** form only asks for
@@ -51,7 +54,7 @@ and log days without connecting Google Health or FatSecret.
   FatSecret per-100g hit first, otherwise one batched LLM estimate), and saved templates load into
   the same editable rows.
 - **Programs, planned on Telegram:** the weekly plan (7 days of training incl. cardio + numeric
-  nutrition targets) is created **from chat** — send `/plan` or just ask ("bana haftalık plan yap");
+  nutrition targets) is created **from chat** — send `/plan` or just ask ("make me a weekly plan");
   the `create_weekly_plan` tool designs and activates both halves on the plan-tier model with
   schema-validated structured output, and they appear on the web Plan page and Calendar
   automatically. Nutrition plans are **numbers only** (kcal, protein, carbs, fat, fiber, sodium
@@ -61,7 +64,7 @@ and log days without connecting Google Health or FatSecret.
   volume load, PRs — all queryable by the LLM (`strength_summary`) and charted in the dashboard.
 - **Cardio capacity:** runs arrive three ways — automatically from Fitbit **exercise sessions** on
   every sync (running-family types at run pace; idempotent via the Google Health dataPoint name),
-  from chat ("5 km koştum, 27:30, nabız 152" → `log_run`), or the Cardio page form. Pace and HR
+  from chat ("ran 5k in 27:30, heart rate 152" → `log_run`), or the Cardio page form. Pace and HR
   trends show aerobic progress (same pace at lower HR = fitter) with a Riegel 5k estimate per run,
   and the coach analyzes pace-vs-HR drift from the run history in its prompt.
 - **Chat anywhere, one memory:** conversation history is server-side, so the web UI and the Telegram
@@ -144,7 +147,7 @@ The knowledge base is small, so these numbers show the method works; they will d
 | Path | Role |
 |---|---|
 | `data/protocols.json` | Unstructured knowledge, searched by meaning (vector DB) |
-| `data/users.json` | Two demo users, loaded into Postgres by `scripts/seed.py` |
+| `data/users.json` | Two demo profiles, loaded into Postgres by `scripts/seed.py`. `--rich` adds a month of meals, runs, workouts, body measures, programs, memories and token usage — every date generated relative to today, so the demo never goes stale. |
 | `app/db/models.py` | 14 tables: `users`, `daily_biometrics`, `integration_accounts`, `user_memories`, `chat_messages`, `food_logs`, `body_measurements`, `meal_templates`, `workout_templates`, `session_adjustments`, `llm_calls`, `programs`, `workout_logs`, `run_logs` |
 | `app/data_access/` | SQL layer: profiles with 7-day baselines, idempotent day upserts, memories, chat history, food logs, meal/workout templates, token usage |
 | `app/rag/embeddings.py` | Text to vectors (OpenAI embeddings) |
@@ -159,6 +162,7 @@ The knowledge base is small, so these numbers show the method works; they will d
 | `app/integrations/` | Google Health and FatSecret clients, OAuth flows, token encryption, sync |
 | `app/telegram/` | Bot handlers + `CoachAPI` HTTP client (thin, stateless) |
 | `web/` | React tracking dashboard (Vite + Tailwind + Recharts); `npm run dev` proxies to the API |
+| `web/scripts/` | `verify-ui.mjs` headless-checks every page against the live API; `shoot-demo.mjs` regenerates the README screenshots from the demo profile and reports any page that rendered empty |
 | `ui/streamlit_app.py` | Legacy Streamlit UI: metrics, charts, chat with server-side history |
 | `ui/pages/` | Streamlit Training, Nutrition, Memory and Cost pages |
 | `migrations/` | Alembic schema migrations |
@@ -178,7 +182,7 @@ pip install -r requirements.txt
 cp .env.example .env                # set OPENAI_API_KEY (or DEMO_MODE=true)
 docker compose up -d                # Postgres on :5432, Qdrant on :6333
 alembic upgrade head                # create the tables
-python -m scripts.seed              # optional: the two demo users
+python -m scripts.seed --rich       # optional: two demo profiles with a month of data
 python -m scripts.ingest            # embed protocols into Qdrant (needs the OpenAI key)
 ```
 

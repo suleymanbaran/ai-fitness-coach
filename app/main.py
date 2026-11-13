@@ -129,7 +129,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     qdrant_client.close()
 
 
-app = FastAPI(title="Fitness RAG Coach", version="0.4.0", lifespan=lifespan)
+app = FastAPI(title="AI Fitness Coach", version="0.4.0", lifespan=lifespan)
 app.include_router(integrations_router)
 app.include_router(programs_router)
 
