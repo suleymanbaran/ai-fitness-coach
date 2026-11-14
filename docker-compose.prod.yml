@@ -31,7 +31,9 @@ services:
 
   # Runs once per deploy: schema migrations, then re-embeds data/protocols.json into Qdrant.
   setup:
-    build: .
+    build:
+      context: .
+      target: app
     env_file: .env.prod
     environment: *app-env
     command: ["sh", "-c", "alembic upgrade head && python -m scripts.ingest"]
@@ -43,7 +45,9 @@ services:
     restart: "no"
 
   api:
-    build: .
+    build:
+      context: .
+      target: app
     env_file: .env.prod
     environment: *app-env
     depends_on:
@@ -53,7 +57,9 @@ services:
 
   # Pulls the last 3 days from every connected provider every 3 hours.
   sync:
-    build: .
+    build:
+      context: .
+      target: app
     env_file: .env.prod
     environment: *app-env
     command: ["sh", "-c", "while true; do python -m scripts.sync --days 3; sleep 10800; done"]
@@ -64,7 +70,9 @@ services:
 
   # Telegram bot: long-polling, talks to the API over the private network (no inbound ports).
   bot:
-    build: .
+    build:
+      context: .
+      target: app
     env_file: .env.prod
     environment:
       <<: *app-env
@@ -77,18 +85,10 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  ui:
-    build: .
-    environment:
-      API_URL: http://api:8000
-    command: ["streamlit", "run", "ui/streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501",
-              "--server.headless=true", "--browser.gatherUsageStats=false"]
-    depends_on:
-      - api
-    restart: unless-stopped
-
   caddy:
-    image: caddy:2-alpine
+    build:
+      context: .
+      target: caddy
     ports:
       - "80:80"
       - "443:443"
@@ -99,7 +99,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     depends_on:
-      - ui
+      - api
     restart: unless-stopped
 
 volumes:

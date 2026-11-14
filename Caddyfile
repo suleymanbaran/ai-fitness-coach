@@ -3,13 +3,20 @@
 {$DOMAIN} {
 	encode gzip
 
-	# Google and FatSecret send the browser back here after the user approves access.
-	# Only these callbacks reach the API from outside; everything else goes to the UI.
-	handle /integrations/*/callback {
+	# The dashboard calls these with relative URLs (web/src/api.ts), mirroring the dev
+	# proxy in web/vite.config.ts, so the browser only ever talks to one origin.
+	# The two /integrations callbacks carry no API token: Google and FatSecret send the
+	# browser back here, and the encrypted expiring `state` is what authenticates them.
+	@backend path /health /ask /users /users/* /integrations/*
+	handle @backend {
 		reverse_proxy api:8000
 	}
 
+	# React Router owns paths like /today and /plan, so anything that is not a real
+	# file must fall back to the SPA shell rather than 404.
 	handle {
-		reverse_proxy ui:8501
+		root * /srv
+		try_files {path} /index.html
+		file_server
 	}
 }
