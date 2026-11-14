@@ -12,7 +12,8 @@ model router with prompt caching.
 
 **Stack:** Python, FastAPI, PostgreSQL (SQLAlchemy, Alembic), Qdrant, OpenAI Responses API
 (`text-embedding-3-small`, `gpt-6-luna`, `gpt-6.1-terra`), React + TypeScript (Vite, Tailwind,
-Recharts), python-telegram-bot, Streamlit (legacy), Docker, Caddy.
+Recharts), python-telegram-bot, Streamlit (legacy), Docker, Caddy. Production serves the React
+dashboard and API from the same HTTPS origin.
 
 **By the numbers:** 139 tests green in CI with no API key (the LLM and embedder are faked) ·
 retrieval MRR 0.94 on a 26-question labeled eval · ~$0.50-1.50/month per user via a two-tier model
@@ -88,7 +89,7 @@ flowchart LR
   diary[FatSecret food diary] --> fatsecret[FatSecret API]
   google -->|"HRV, resting HR, sleep"| postgres
   fatsecret -->|calories| postgres
-  web[Streamlit UI] --> api
+  web[React dashboard] --> api
   tg[Telegram bot] -->|"HTTP + bearer token"| api
   question[Question] --> api["/ask"]
   api --> embed[Embed]
@@ -398,13 +399,44 @@ network, with [Caddy](https://caddyserver.com) in front serving the UI over HTTP
 are exposed; the bot talks to Telegram outbound via long polling and needs no port at all.
 Each deploy runs `alembic upgrade head` and `scripts.ingest` before the API starts.
 
-On a server with Docker and a domain whose DNS points at it:
+### AWS deployment
+
+The repository does not contain Terraform, CloudFormation, ECS, RDS, or other AWS resource
+definitions. The supported production deployment is the Docker Compose stack above, so on AWS it
+must run on a Docker-capable host (for example, an EC2 instance) whose DNS name points to the
+domain in `DOMAIN`. AWS resources, DNS records, storage, backups, and firewall rules remain
+outside this repository.
+
+Before starting the stack on the host:
+
+1. Point the domain's DNS record at the host and allow inbound TCP ports 80 and 443 in its
+   firewall/security group. Caddy uses port 80 for HTTP-to-HTTPS handling and certificate
+   issuance, and port 443 for the dashboard and API.
+2. Install Docker with Compose support, clone this repository, and keep the repository's
+   `docker-compose.prod.yml` and `Caddyfile` together.
+3. Use persistent host storage for Docker volumes (`postgres_data`, `qdrant_data`, `caddy_data`,
+   and `caddy_config`) and configure backups separately if the deployment needs data recovery.
+
+The production variables that must be supplied by the operator are `DOMAIN`,
+`POSTGRES_PASSWORD`, and `OPENAI_API_KEY`. `TOKEN_ENCRYPTION_KEY` is required when Google Health
+or FatSecret is enabled. Google/FatSecret credentials and the Telegram variables are optional
+feature-specific settings; the complete template and defaults are in `.env.prod.example`.
+
+Run the stack from the repository root:
 
 ```bash
-cp .env.prod.example .env.prod      # set DOMAIN, POSTGRES_PASSWORD, OPENAI_API_KEY (+ TELEGRAM_* for the bot)
+cp .env.prod.example .env.prod      # set DOMAIN, POSTGRES_PASSWORD and OPENAI_API_KEY
 docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
 docker compose -f docker-compose.prod.yml --env-file .env.prod exec api \
   python -m scripts.issue_token me --name "Suleyman"     # prints your access token once
+```
+
+The `setup` service applies migrations and ingests `data/protocols.json` before `api`, `sync`,
+and `bot` start. Check it before diagnosing dependent services:
+
+```bash
+docker compose -f docker-compose.prod.yml --env-file .env.prod logs setup
+docker compose -f docker-compose.prod.yml --env-file .env.prod ps
 ```
 
 Open `https://<DOMAIN>` and sign in with the token. In production:
