@@ -13,6 +13,6 @@ def test_historical_total_burn_uses_current_discount_without_mutating_raw_values
 
     context = format_user_context(profile)
 
-    assert "TOTAL energy burned (Fitbit x0.8, incl. BMR) 2111 kcal" in context
-    assert context.count("total burn 2111 kcal") == 2
+    assert "TOTAL energy burned (Fitbit x0.9, incl. BMR) 2375 kcal" in context
+    assert context.count("total burn 2375 kcal") == 2
     assert [day.total_kcal for day in history] == [2639, 2639]

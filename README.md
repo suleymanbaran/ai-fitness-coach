@@ -257,7 +257,7 @@ Fitbit does not have its own API anymore. Its data is read through the
 [Google Health API](https://developers.google.com/health), the successor of the Fitbit Web API.
 Calories come from the [FatSecret Platform API](https://platform.fatsecret.com).
 Typing a day still works, and a later sync only overwrites the fields that provider owns.
-Google's total-calories value is stored unchanged; the coach and UI apply a 20% reduction (×0.8)
+Google's total-calories value is stored unchanged; the coach and UI apply a 10% reduction (×0.9)
 when calculating total burn. Because this adjustment is derived when displaying or using the data,
 past records automatically use the new factor without rewriting historical or active-calorie values.
 

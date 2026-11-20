@@ -100,7 +100,7 @@ export default function Trends({ userId }: { userId: string }) {
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const m = metricsByDate.get(key);
       const intake = intakeByDate.get(key) ?? null;
-      // Real Fitbit total (×0.8 margin) wins; else BMR estimate + active burn.
+      // Real Fitbit total (×0.9 margin) wins; else BMR estimate + active burn.
       const total =
         m?.total_kcal != null
           ? adjustedTotalBurn(m.total_kcal)

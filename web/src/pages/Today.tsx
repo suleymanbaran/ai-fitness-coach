@@ -120,7 +120,7 @@ export default function Today({ userId }: { userId: string }) {
         />
         <Stat label="Steps" value={day?.steps != null ? day.steps.toLocaleString() : "—"} />
         <Stat label="Active burn" value={fmt(day?.active_kcal)} unit="kcal" />
-        {/* Same 20% discount as the Trends energy balance. */}
+        {/* Same 10% discount as the Trends energy balance. */}
         <Stat
           label="Total burn"
           value={adjustedTotalBurn(day?.total_kcal ?? null)?.toLocaleString() ?? "—"}
