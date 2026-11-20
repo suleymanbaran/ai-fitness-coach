@@ -257,6 +257,9 @@ Fitbit does not have its own API anymore. Its data is read through the
 [Google Health API](https://developers.google.com/health), the successor of the Fitbit Web API.
 Calories come from the [FatSecret Platform API](https://platform.fatsecret.com).
 Typing a day still works, and a later sync only overwrites the fields that provider owns.
+Google's total-calories value is stored unchanged; the coach and UI apply a 20% reduction (×0.8)
+when calculating total burn. Because this adjustment is derived when displaying or using the data,
+past records automatically use the new factor without rewriting historical or active-calorie values.
 
 **Who can connect.** The Google Cloud app stays in Testing. Only Google accounts added under
 **Google Auth Platform → Audience → Test users** can approve Fitbit access (up to 100 accounts).

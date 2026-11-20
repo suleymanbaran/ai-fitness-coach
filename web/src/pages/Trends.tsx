@@ -17,9 +17,7 @@ import {
 import { api } from "../api";
 import { useFetch } from "../hooks";
 import { Card, Empty, ErrorNote, PageHeader, Spinner } from "../components/ui";
-
-// Fitbit's total burn runs ~10% optimistic per the user; keep raw values in the DB, discount here.
-const FITBIT_BURN_FACTOR = 0.9;
+import { adjustedTotalBurn, TOTAL_BURN_FACTOR } from "../calories";
 
 const AXES = { stroke: "#6b7580", fontSize: 11, tickLine: false, axisLine: false } as const;
 const TOOLTIP = {
@@ -102,10 +100,10 @@ export default function Trends({ userId }: { userId: string }) {
       const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
       const m = metricsByDate.get(key);
       const intake = intakeByDate.get(key) ?? null;
-      // Real Fitbit total (×0.9 margin) wins; else BMR estimate + active burn.
+      // Real Fitbit total (×0.8 margin) wins; else BMR estimate + active burn.
       const total =
         m?.total_kcal != null
-          ? Math.round(m.total_kcal * FITBIT_BURN_FACTOR)
+          ? adjustedTotalBurn(m.total_kcal)
           : bmr != null && m?.active_kcal != null
             ? bmr + m.active_kcal
             : null;
@@ -227,7 +225,7 @@ export default function Trends({ userId }: { userId: string }) {
             <Empty>No intake logged in this window — log meals to see your daily balance.</Empty>
           )}
           <p className="mt-2 text-xs text-ash">
-            Per day: white = intake, orange = total burn (Fitbit total-calories × 0.9 accuracy margin
+            Per day: white = intake, orange = total burn (Fitbit total-calories × {TOTAL_BURN_FACTOR} accuracy margin
             {bmr != null ? "; days without Fitbit data use BMR + active" : ""}), purple dashed = active burn.
             Bars = intake − total burn: lime deficit, red surplus. Averages and totals count only days
             with both intake and burn logged.

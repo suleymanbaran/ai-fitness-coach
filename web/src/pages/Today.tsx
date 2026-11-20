@@ -3,6 +3,7 @@ import { Flame, RefreshCw } from "lucide-react";
 import { api } from "../api";
 import { useFetch, todayISO } from "../hooks";
 import { Badge, Button, Card, Empty, ErrorNote, PageHeader, Spinner, Stat } from "../components/ui";
+import { adjustedTotalBurn, TOTAL_BURN_FACTOR } from "../calories";
 
 function CalorieRing({ eaten, target }: { eaten: number; target: number | null }) {
   const size = 168;
@@ -119,12 +120,12 @@ export default function Today({ userId }: { userId: string }) {
         />
         <Stat label="Steps" value={day?.steps != null ? day.steps.toLocaleString() : "—"} />
         <Stat label="Active burn" value={fmt(day?.active_kcal)} unit="kcal" />
-        {/* Same accuracy margin as the Trends energy balance: Fitbit totals run ~10% optimistic. */}
+        {/* Same 20% discount as the Trends energy balance. */}
         <Stat
           label="Total burn"
-          value={day?.total_kcal != null ? Math.round(day.total_kcal * 0.9).toLocaleString() : "—"}
+          value={adjustedTotalBurn(day?.total_kcal ?? null)?.toLocaleString() ?? "—"}
           unit="kcal"
-          delta="Fitbit ×0.9, incl. BMR"
+          delta={`Fitbit ×${TOTAL_BURN_FACTOR}, incl. BMR`}
           deltaGood={null}
         />
         <Stat label="Weight" value={fmt(profile.data?.weight_kg, 1)} unit="kg" />
