@@ -205,9 +205,9 @@ def format_user_context(user: UserProfile) -> str:
     return "\n".join(lines)
 
 
-# Fitbit's total-burn value is discounted by 20%; the raw value stays in the DB and the
+# Fitbit's total-burn value is discounted by 10%; the raw value stays in the DB and the
 # adjustment is applied wherever total burn feeds analysis.
-TOTAL_BURN_FACTOR = 0.8
+TOTAL_BURN_FACTOR = 0.9
 
 
 def _adjusted_burn(total_kcal: int | None) -> int | None:
