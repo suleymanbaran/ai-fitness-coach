@@ -41,6 +41,7 @@ export interface Meal {
   meal: string;
   description: string;
   fatsecret_food_id: string | null;
+  fatsecret_entry_id: string | null;
   servings: number;
   kcal: number;
   protein_g: number | null;
@@ -303,6 +304,8 @@ export const api = {
   meals: (id: string, date?: string) =>
     request<Meal[]>("GET", `/users/${id}/meals${date ? `?day=${date}` : ""}`),
   logMeal: (id: string, body: Record<string, unknown>) => request<Meal>("POST", `/users/${id}/meals`, body),
+  updateMeal: (id: string, mealId: number, body: Record<string, unknown>) =>
+    request<Meal>("PUT", `/users/${id}/meals/${mealId}`, body),
   computeMeal: (id: string, items: { name: string; grams: number }[]) =>
     request<MealCompute>("POST", `/users/${id}/meals/compute`, { items }),
   deleteMeal: (id: string, mealId: number) => request<void>("DELETE", `/users/${id}/meals/${mealId}`),

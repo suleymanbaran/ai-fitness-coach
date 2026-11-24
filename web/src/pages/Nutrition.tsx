@@ -1,7 +1,7 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { BookmarkPlus, MessageCircle, Plus, Trash2, X, Zap } from "lucide-react";
-import { api, MealTemplate, MealTemplateItem, ResolvedItem } from "../api";
+import { BookmarkPlus, ChevronLeft, ChevronRight, MessageCircle, Plus, Trash2, X, Zap } from "lucide-react";
+import { api, Meal, MealTemplate, MealTemplateItem, ResolvedItem } from "../api";
 import { useFetch, todayISO } from "../hooks";
 import { Badge, Button, Card, Empty, ErrorNote, Input, PageHeader, Select, Spinner, Stat } from "../components/ui";
 
@@ -177,17 +177,18 @@ function TemplateEditor({
   );
 }
 
-function MealTemplates({ userId }: { userId: string }) {
+function MealTemplates({ userId, day }: { userId: string; day: string }) {
   const templates = useFetch(() => api.mealTemplates(userId), [userId]);
   const [editing, setEditing] = useState<number | "new" | null>(null);
   const [factors, setFactors] = useState<Record<number, string>>({});
   const [message, setMessage] = useState("");
 
   const log = async (template: MealTemplate) => {
+    if (day > todayISO()) return;
     const factor = Number(factors[template.id] || "1") || 1;
     setMessage("");
     try {
-      const meal = await api.logFromTemplate(userId, template.name, factor);
+      const meal = await api.logFromTemplate(userId, template.name, factor, day);
       setMessage(`Logged "${meal.description}" — ${meal.kcal} kcal`);
       window.dispatchEvent(new Event("meals-changed"));
     } catch (err) {
@@ -205,6 +206,11 @@ function MealTemplates({ userId }: { userId: string }) {
       }
     >
       {message && <p className="mb-3 text-sm text-lime">{message}</p>}
+      {day > todayISO() && (
+        <p className="mb-3 text-xs text-ash">
+          New meals cannot be logged for future dates. Existing local meals can be edited; manage FatSecret-linked entries there.
+        </p>
+      )}
       {templates.loading ? (
         <Spinner label="" />
       ) : !templates.data?.length ? (
@@ -233,7 +239,7 @@ function MealTemplates({ userId }: { userId: string }) {
                     onChange={(e) => setFactors({ ...factors, [template.id]: e.target.value })}
                     title="Portion factor"
                   />
-                  <Button variant="primary" onClick={() => log(template)}>
+                  <Button variant="primary" onClick={() => log(template)} disabled={day > todayISO()}>
                     Log
                   </Button>
                   <Button variant="ghost" onClick={() => setEditing(editing === template.id ? null : template.id)}>
@@ -282,6 +288,83 @@ function MealTemplates({ userId }: { userId: string }) {
 }
 
 const GRAMS_RE = /^\s*([\d.,]+)\s*(?:g|gr|gram)\b\.?\s+(.+)$/i;
+
+function EditMealForm({ userId, meal, onSaved, onCancel }: {
+  userId: string;
+  meal: Meal;
+  onSaved: () => void;
+  onCancel: () => void;
+}) {
+  const [values, setValues] = useState({
+    meal: meal.meal,
+    description: meal.description,
+    kcal: String(meal.kcal),
+    protein_g: meal.protein_g == null ? "" : String(meal.protein_g),
+    carbs_g: meal.carbs_g == null ? "" : String(meal.carbs_g),
+    fat_g: meal.fat_g == null ? "" : String(meal.fat_g),
+    fiber_g: meal.fiber_g == null ? "" : String(meal.fiber_g),
+  });
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api.updateMeal(userId, meal.id, {
+        meal: values.meal,
+        description: values.description.trim(),
+        kcal: Number(values.kcal),
+        protein_g: values.protein_g === "" ? null : Number(values.protein_g),
+        carbs_g: values.carbs_g === "" ? null : Number(values.carbs_g),
+        fat_g: values.fat_g === "" ? null : Number(values.fat_g),
+        fiber_g: values.fiber_g === "" ? null : Number(values.fiber_g),
+      });
+      onSaved();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not update meal");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={save} className="mt-3 space-y-3 rounded-lg border border-edge bg-night-3 p-3">
+      <div className="grid gap-2 sm:grid-cols-[140px_1fr_100px]">
+        <Select value={values.meal} onChange={(e) => setValues({ ...values, meal: e.target.value })}>
+          {["breakfast", "lunch", "dinner", "snack"].map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+        </Select>
+        <Input required maxLength={200} value={values.description} onChange={(e) => setValues({ ...values, description: e.target.value })} aria-label="Meal description" />
+        <Input required type="number" min={0} max={20000} value={values.kcal} onChange={(e) => setValues({ ...values, kcal: e.target.value })} aria-label="Calories (kcal)" />
+      </div>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {([
+          ["protein_g", "Protein (g)"],
+          ["carbs_g", "Carbs (g)"],
+          ["fat_g", "Fat (g)"],
+          ["fiber_g", "Fiber (g)"],
+        ] as const).map(([key, label]) => (
+          <Input
+            key={key}
+            type="number"
+            min={0}
+            step="0.1"
+            placeholder={label}
+            aria-label={label}
+            value={values[key]}
+            onChange={(e) => setValues({ ...values, [key]: e.target.value })}
+          />
+        ))}
+      </div>
+      <div className="flex items-center justify-end gap-2">
+        {error && <span className="mr-auto text-sm text-ember">{error}</span>}
+        <Button type="button" variant="ghost" onClick={onCancel} disabled={busy}>Cancel</Button>
+        <Button type="submit" variant="primary" disabled={busy}>{busy ? "Saving..." : "Save changes"}</Button>
+      </div>
+    </form>
+  );
+}
 
 /* Name + grams per line; the backend resolves kcal/macros (FatSecret per-100g or one
    batched LLM estimate). Saved meal templates load into the same rows, editable. */
@@ -517,20 +600,29 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
 
 export default function Nutrition({ userId }: { userId: string }) {
   const [day, setDay] = useState(todayISO());
+  const [editingMeal, setEditingMeal] = useState<number | null>(null);
   const meals = useFetch(() => api.meals(userId, day), [userId, day]);
   const intake = useFetch(() => api.intake(userId, 14), [userId]);
   const programs = useFetch(() => api.programs(userId, "active"), [userId]);
 
 
   // Template "Log" buttons notify us so the day's list refreshes.
-  useMemo(() => {
+  useEffect(() => {
     const handler = () => {
       meals.reload();
       intake.reload();
     };
     window.addEventListener("meals-changed", handler);
     return () => window.removeEventListener("meals-changed", handler);
-  }, [meals, intake]);
+  }, [userId]);
+
+  const changeDay = (offset: number) => {
+    const [year, month, date] = day.split("-").map(Number);
+    const next = new Date(year, month - 1, date + offset);
+    const nextDay = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-${String(next.getDate()).padStart(2, "0")}`;
+    setEditingMeal(null);
+    setDay(nextDay);
+  };
 
   const nutritionProgram = (programs.data ?? []).find((p) => p.kind === "nutrition");
   const target = typeof nutritionProgram?.payload?.target_kcal === "number" ? nutritionProgram.payload.target_kcal : null;
@@ -594,7 +686,26 @@ export default function Nutrition({ userId }: { userId: string }) {
                 <span className="text-sm font-semibold text-lime">
                   {dayTotal.toLocaleString()} kcal{dayFiber > 0 && <span className="text-mist"> · {dayFiber.toFixed(0)} g fiber</span>}
                 </span>
-                <Input type="date" value={day} max={todayISO()} onChange={(e) => setDay(e.target.value)} className="w-auto!" />
+                <div className="flex items-center gap-1">
+                  <Button type="button" variant="ghost" className="px-2" onClick={() => changeDay(-1)} aria-label="Previous day">
+                    <ChevronLeft className="h-4 w-4" />
+                  </Button>
+                  <Input
+                    type="date"
+                    value={day}
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setEditingMeal(null);
+                        setDay(e.target.value);
+                      }
+                    }}
+                    className="w-auto!"
+                    aria-label="Selected nutrition day"
+                  />
+                  <Button type="button" variant="ghost" className="px-2" onClick={() => changeDay(1)} disabled={day >= todayISO()} aria-label="Next day">
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                </div>
               </div>
             }
           >
@@ -603,24 +714,47 @@ export default function Nutrition({ userId }: { userId: string }) {
             ) : meals.data && meals.data.length > 0 ? (
               <ul className="divide-y divide-edge">
                 {meals.data.map((m) => (
-                  <li key={m.id} className="flex items-center justify-between gap-2 py-2.5">
-                    <div className="min-w-0">
-                      <span className="text-sm font-medium text-cloud">{m.description}</span>
-                      <div className="mt-0.5 flex items-center gap-2 text-xs text-mist">
-                        <Badge>{m.meal}</Badge>
-                        <Badge tone={m.source === "assistant" ? "amber" : m.source === "template" ? "lime" : "zinc"}>{m.source}</Badge>
-                        {m.protein_g != null && <span>P {m.protein_g}g</span>}
-                        {m.carbs_g != null && <span>C {m.carbs_g}g</span>}
-                        {m.fat_g != null && <span>F {m.fat_g}g</span>}
-                        {m.fiber_g != null && <span>Fiber {m.fiber_g}g</span>}
+                  <li key={m.id} className="py-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="min-w-0">
+                        <span className="text-sm font-medium text-cloud">{m.description}</span>
+                        <div className="mt-0.5 flex items-center gap-2 text-xs text-mist">
+                          <Badge>{m.meal}</Badge>
+                          <Badge tone={m.source === "assistant" ? "amber" : m.source === "template" ? "lime" : "zinc"}>{m.source}</Badge>
+                          {m.protein_g != null && <span>P {m.protein_g}g</span>}
+                          {m.carbs_g != null && <span>C {m.carbs_g}g</span>}
+                          {m.fat_g != null && <span>F {m.fat_g}g</span>}
+                          {m.fiber_g != null && <span>Fiber {m.fiber_g}g</span>}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-3">
+                        <span className="text-sm font-semibold text-cloud">{m.kcal}</span>
+                        {m.fatsecret_entry_id ? (
+                          <span className="text-xs text-ash" title="Manage this entry in FatSecret">Manage in FatSecret</span>
+                        ) : (
+                          <>
+                            <Button variant="ghost" className="px-2" onClick={() => setEditingMeal(editingMeal === m.id ? null : m.id)}>
+                              {editingMeal === m.id ? "Cancel" : "Edit"}
+                            </Button>
+                            <button onClick={() => remove(m.id)} className="text-ash transition-colors hover:text-ember" aria-label={`Delete ${m.description}`}>
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
-                    <div className="flex shrink-0 items-center gap-3">
-                      <span className="text-sm font-semibold text-cloud">{m.kcal}</span>
-                      <button onClick={() => remove(m.id)} className="text-ash transition-colors hover:text-ember">
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
+                    {editingMeal === m.id && !m.fatsecret_entry_id && (
+                      <EditMealForm
+                        userId={userId}
+                        meal={m}
+                        onCancel={() => setEditingMeal(null)}
+                        onSaved={() => {
+                          setEditingMeal(null);
+                          meals.reload();
+                          intake.reload();
+                        }}
+                      />
+                    )}
                   </li>
                 ))}
               </ul>
@@ -629,16 +763,22 @@ export default function Nutrition({ userId }: { userId: string }) {
             )}
           </Card>
 
-          <AddMealCard
-            userId={userId}
-            day={day}
-            onLogged={() => {
-              meals.reload();
-              intake.reload();
-            }}
-          />
+          {day > todayISO() ? (
+            <Card title="Add meal">
+              <Empty>New meals cannot be logged for future dates. Existing local meals can still be edited.</Empty>
+            </Card>
+          ) : (
+            <AddMealCard
+              userId={userId}
+              day={day}
+              onLogged={() => {
+                meals.reload();
+                intake.reload();
+              }}
+            />
+          )}
 
-          <MealTemplates userId={userId} />
+          <MealTemplates userId={userId} day={day} />
         </div>
 
         <div className="space-y-4">

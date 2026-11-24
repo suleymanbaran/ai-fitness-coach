@@ -84,6 +84,18 @@ class MealIn(BaseModel):
     fiber_g: float | None = Field(None, ge=0, le=300)
 
 
+class MealUpdate(BaseModel):
+    """Fields editable on a logged meal; its date and external diary link stay unchanged."""
+
+    meal: Meal
+    description: str = Field(..., min_length=1, max_length=200)
+    kcal: int = Field(..., ge=0, le=20000)
+    protein_g: float | None = Field(None, ge=0, le=1000)
+    carbs_g: float | None = Field(None, ge=0, le=1000)
+    fat_g: float | None = Field(None, ge=0, le=1000)
+    fiber_g: float | None = Field(None, ge=0, le=300)
+
+
 class MeasurementIn(BaseModel):
     """Only the measures you send are written; omitted ones keep their stored value."""
 

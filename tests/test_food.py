@@ -9,7 +9,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.config import Settings
-from app.db.models import DailyBiometrics, IntegrationAccount
+from app.db.models import DailyBiometrics, FoodLog, IntegrationAccount
 from app.integrations.common import IntegrationError, ReauthRequired, TokenCipher
 from app.integrations.fatsecret import (
     FatSecretClient,
@@ -131,6 +131,38 @@ def test_meal_endpoints_log_and_total_the_day(fakes):
     future = fakes.client.post("/users/u1/meals", json={"meal": "dinner", "description": "x", "kcal": 100, "date": "2099-01-01"})
     assert future.status_code == 422
     assert fakes.client.post("/users/nobody/meals", json={"meal": "dinner", "description": "x", "kcal": 100}).status_code == 404
+
+
+def test_meal_update_preserves_day_and_refreshes_daily_totals(fakes):
+    created = fakes.client.post("/users/u1/meals", json={
+        "meal": "breakfast", "description": "Oats", "kcal": 400, "protein_g": 20,
+    }).json()
+
+    updated = fakes.client.put(f"/users/u1/meals/{created['id']}", json={
+        "meal": "lunch", "description": "Chicken and rice", "kcal": 650, "protein_g": 45,
+    })
+    assert updated.status_code == 200
+    assert updated.json()["date"] == str(TODAY)
+    assert updated.json()["description"] == "Chicken and rice"
+    assert updated.json()["protein_g"] == 45
+    assert fakes.client.get("/users/u1/intake?days=1").json()[0]["kcal"] == 650
+
+    # Omitted optional macros are preserved rather than silently erased.
+    updated = fakes.client.put(f"/users/u1/meals/{created['id']}", json={
+        "meal": "dinner", "description": "Dinner", "kcal": 700,
+    })
+    assert updated.status_code == 200
+    assert updated.json()["protein_g"] == 45
+    assert fakes.client.get("/users/u1/intake?days=1").json()[0]["kcal"] == 700
+
+    row = fakes.db.get(FoodLog, created["id"])
+    row.fatsecret_entry_id = "777"
+    fakes.db.commit()
+    blocked = fakes.client.put(f"/users/u1/meals/{created['id']}", json={
+        "meal": "dinner", "description": "Changed", "kcal": 800,
+    })
+    assert blocked.status_code == 409
+    assert fakes.db.get(FoodLog, created["id"]).description == "Dinner"
 
 
 def test_intake_appears_in_the_prompt(fakes):
