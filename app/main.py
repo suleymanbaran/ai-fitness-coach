@@ -19,6 +19,7 @@ from app.data_access.food import (
     add_food_log,
     day_intake,
     delete_food_log,
+    get_food_log,
     intake_window,
     list_food_logs,
     sync_day_calories,
@@ -78,6 +79,7 @@ from app.schemas import (
     MealComputeIn,
     MealComputeOut,
     MealIn,
+    MealUpdate,
     MeasurementIn,
     MemoryIn,
     MemoryKind,
@@ -453,6 +455,34 @@ def meals(
     if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
     return list_food_logs(db, user_id, day or date.today(), day or date.today())
+
+
+@app.put("/users/{user_id}/meals/{meal_id}", response_model=FoodLogOut)
+def update_meal(
+    meal_id: int,
+    meal: MealUpdate,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+) -> FoodLogOut:
+    authorize(user_id, current)
+    row = get_food_log(db, user_id, meal_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    if row.fatsecret_entry_id:
+        raise HTTPException(
+            status_code=409,
+            detail="This meal is linked to a FatSecret diary entry and cannot be edited here.",
+        )
+
+    updates = meal.model_dump(exclude_unset=True)
+    for field in ("meal", "description", "kcal", "servings", "protein_g", "carbs_g", "fat_g", "fiber_g"):
+        if field in updates:
+            setattr(row, field, updates[field])
+
+    sync_day_calories(db, user_id, row.date)
+    db.commit()
+    return FoodLogOut.model_validate(row, from_attributes=True)
 
 
 @app.delete("/users/{user_id}/meals/{meal_id}", status_code=204)

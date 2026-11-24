@@ -1,12 +1,16 @@
 """Meal compute: FatSecret per-100g parsing, LLM estimate fallback, endpoint wiring."""
 
 import json
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from app.nutrition import PER_100G_RE, MealItemQuery, resolve_items
+from app.main import update_meal
 from app.rag.generator import LLMReply, LLMUsage
+from app.schemas import MealUpdate
 
 DESC = "Per 100g - Calories: 389kcal | Fat: 7.20g | Carbs: 66.30g | Protein: 16.90g"
 
@@ -88,3 +92,59 @@ def test_compute_endpoint_requires_resolvable_items(fakes):
     # validation still applies
     assert fakes.client.post("/users/u1/meals/compute", json={"items": []}).status_code == 422
     assert fakes.client.post("/users/u1/meals/compute", json={"items": [{"name": "x", "grams": 0}]}).status_code == 422
+
+
+def test_update_meal_refreshes_totals_and_rejects_external_diary_entries(monkeypatch):
+    day = date.today() + timedelta(days=1)
+    row = SimpleNamespace(
+        id=1,
+        date=day,
+        meal="breakfast",
+        description="Oats",
+        fatsecret_food_id=None,
+        fatsecret_entry_id=None,
+        servings=1,
+        kcal=400,
+        protein_g=20,
+        carbs_g=None,
+        fat_g=None,
+        fiber_g=None,
+        source="manual",
+    )
+    refreshed_days = []
+
+    class FakeDB:
+        commits = 0
+
+        def commit(self):
+            self.commits += 1
+
+    db = FakeDB()
+    monkeypatch.setattr("app.main.authorize", lambda *_: None)
+    monkeypatch.setattr("app.main.get_food_log", lambda *_: row)
+    monkeypatch.setattr("app.main.sync_day_calories", lambda _db, _user, changed_day: refreshed_days.append(changed_day))
+
+    updated = update_meal(
+        meal_id=1,
+        meal=MealUpdate(meal="lunch", description="Chicken and rice", kcal=650, protein_g=45),
+        user_id="u1",
+        db=db,
+        current=None,
+    )
+    assert updated.description == "Chicken and rice"
+    assert updated.kcal == 650
+    assert updated.date == day
+    assert refreshed_days == [day]
+    assert db.commits == 1
+
+    row.fatsecret_entry_id = "777"
+    with pytest.raises(HTTPException) as exc:
+        update_meal(
+            meal_id=1,
+            meal=MealUpdate(meal="dinner", description="Changed", kcal=800),
+            user_id="u1",
+            db=db,
+            current=None,
+        )
+    assert exc.value.status_code == 409
+    assert row.description == "Chicken and rice"
