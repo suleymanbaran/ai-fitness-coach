@@ -35,6 +35,7 @@ from app.integrations.service import Integrations, get_account
 from app.programs.schemas import WorkoutIn
 from app.programs.service import (
     ProgramGenerationError,
+    ProgramInputError,
     add_workout,
     exercise_history as exercise_progression,
     generate_weekly_plan,
@@ -483,8 +484,8 @@ CREATE_WEEKLY_PLAN_TOOL = {
     "name": "create_weekly_plan",
     "description": (
         "Design and activate a NEW full weekly plan (training + cardio + nutrition) with the plan "
-        "model. Use this whenever the user asks for a weekly plan in chat — it is saved to their "
-        "web Plan page and calendar, so never just reply with a plan as text. Takes about a "
+        "model. A nutrition plan requires explicit energy inputs on the web Plan page; direct the "
+        "user there rather than guessing them. It is saved to their web Plan page and calendar. Takes about a "
         "minute. For changes to the CURRENT plan use revise_program instead."
     ),
     "parameters": {
@@ -859,6 +860,8 @@ def build_ask_tools(
             revised = revise_program_service(
                 db, plan_ctx.coach, plan_ctx.embedder, plan_ctx.store, user, program, feedback, settings
             )
+        except ProgramInputError as exc:
+            return f"error: {exc}"
         except ProgramGenerationError:
             return "error: revision failed schema validation twice; tell the user to try again in a moment"
         return f"{kind} program revised to v{revised.version} and activated: {revised.summary[:240]}"
@@ -874,6 +877,8 @@ def build_ask_tools(
             training, nutrition = generate_weekly_plan(
                 db, plan_ctx.coach, plan_ctx.embedder, plan_ctx.store, user, brief, settings
             )
+        except ProgramInputError as exc:
+            return f"error: {exc}"
         except ProgramGenerationError:
             return "error: plan generation failed validation twice; tell the user to try again in a moment"
         return (

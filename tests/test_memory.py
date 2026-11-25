@@ -157,7 +157,7 @@ def test_ask_tools_log_days_and_memories(fakes):
         "get_today_session", "log_workout", "log_run", "exercise_history", "strength_summary",
         "adjust_session", "revise_program", "create_weekly_plan",
     }
-    assert {"type": "web_search"} in tools
+    assert {"type": "web_search"} not in tools
 
     today = date.today()
     assert handlers["log_day"]({"date": str(today), "hrv_ms": 55, "sleep_score": 70}) == f"logged {today}: hrv_ms=55.0, sleep_score=70"

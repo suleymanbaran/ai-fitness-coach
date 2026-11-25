@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { CalendarDays, Flame, Footprints, HeartPulse, MessageCircle } from "lucide-react";
-import { api, Program } from "../api";
+import { api, EnergyInputs, Program } from "../api";
 import { useFetch } from "../hooks";
 import { STEP_GOAL, dayKind, GridDay } from "../planDays";
 import { Badge, Button, Card, Empty, ErrorNote, Input, PageHeader, Select, Spinner } from "../components/ui";
@@ -105,6 +105,52 @@ export default function Plan({ userId }: { userId: string }) {
   const [feedback, setFeedback] = useState("");
   const [reviseKind, setReviseKind] = useState("training");
   const [reviewText, setReviewText] = useState("");
+  const [brief, setBrief] = useState("");
+  const [equation, setEquation] = useState("");
+  const [activity, setActivity] = useState("");
+  const [safety, setSafety] = useState(false);
+  const [preview, setPreview] = useState<{ target_kcal: number; resting_kcal: number; activity_factor: number } | null>(null);
+  const profile = useFetch(() => api.user(userId), [userId]);
+
+  const energy = (): EnergyInputs | null => {
+    if ((equation !== "female" && equation !== "male") ||
+      (activity !== "sedentary" && activity !== "light" && activity !== "moderate" && activity !== "very_active") || !safety) {
+      setError("Choose the equation and activity and confirm the safety conditions below.");
+      return null;
+    }
+    return { equation, activity, safety_confirmed: true };
+  };
+
+  const generate = async () => {
+    setError("");
+    const inputs = energy();
+    if (!inputs) return;
+    setBusy(true);
+    try {
+      await api.planWeek(userId, brief, inputs);
+      setReviewText("Plan created. The calorie value is an estimated maintenance level, not a prescription.");
+      programs.reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not create plan");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const calculate = async () => {
+    setError("");
+    const inputs = energy();
+    if (!inputs) return;
+    setBusy(true);
+    try {
+      setPreview(await api.energyEstimate(userId, inputs));
+    } catch (err) {
+      setPreview(null);
+      setError(err instanceof Error ? err.message : "Could not estimate energy");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   if (programs.loading) return <Spinner />;
 
@@ -116,10 +162,12 @@ export default function Plan({ userId }: { userId: string }) {
   const revise = async () => {
     const active = reviseKind === "training" ? activeTraining : activeNutrition;
     if (!active || !feedback.trim()) return;
+    const inputs = reviseKind === "nutrition" ? energy() : undefined;
+    if (reviseKind === "nutrition" && !inputs) return;
     setBusy(true);
     setError("");
     try {
-      const revised = await api.reviseProgram(userId, active.id, feedback.trim());
+      const revised = await api.reviseProgram(userId, active.id, feedback.trim(), inputs || undefined);
       setFeedback("");
       setReviewText(`Revised to v${revised.version}: ${revised.summary}`);
       programs.reload();
@@ -152,12 +200,40 @@ export default function Plan({ userId }: { userId: string }) {
         <p className="flex items-start gap-2 text-sm text-mist">
           <MessageCircle className="mt-0.5 h-4 w-4 shrink-0 text-cyan" />
           <span>
-            Ask the coach for a plan — send <code className="rounded bg-white/5 px-1">/plan</code> or just say
-            "make me a weekly plan, 4 days, knee-friendly". It designs all 7 days (strength + cardio +
-            numeric nutrition targets), activates them, and the plan shows up here and on the
-            calendar automatically. Changes: tell the coach in chat, or use Revise below.
+            Ask the coach about your needs, then use the form below for a weekly plan. Nutrition
+            revisions also need fresh energy inputs; training-only changes can be requested in chat.
           </span>
         </p>
+      </Card>
+
+      <Card title="Energy estimate and weekly plan" className="mb-4">
+        <div className="space-y-3">
+          <p className="text-sm text-mist">Uses your profile: age {profile.data?.age ?? "—"}, weight {profile.data?.weight_kg ?? "—"} kg, height {profile.data?.height_cm ?? "—"} cm. Update missing or outdated values in Settings.</p>
+          <p className="text-sm text-mist">Mifflin–St Jeor estimates adult resting energy, multiplied by activity. Choose the equation appropriate for you; if uncertain, ask a professional. This is an uncertain maintenance estimate, not a weight-loss target or medical advice. Inputs are saved with the plan. Recalculate if your profile or activity changes; macros are AI suggestions.</p>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="text-sm text-mist">Equation coefficient
+              <Select value={equation} onChange={(e) => { setEquation(e.target.value); setPreview(null); }}>
+                <option value="">Select</option><option value="female">Female equation (−161)</option><option value="male">Male equation (+5)</option>
+              </Select>
+            </label>
+            <label className="text-sm text-mist">Usual activity
+              <Select value={activity} onChange={(e) => { setActivity(e.target.value); setPreview(null); }}>
+                <option value="">Select</option><option value="sedentary">Sedentary (1.2)</option><option value="light">Light (1.375)</option><option value="moderate">Moderate (1.55)</option><option value="very_active">Very active (1.725)</option>
+              </Select>
+            </label>
+          </div>
+          <label className="flex items-start gap-2 text-sm text-mist">
+            <input type="checkbox" checked={safety} onChange={(e) => { setSafety(e.target.checked); setPreview(null); }} />
+            <span>I am an adult, not pregnant or breastfeeding, and do not have an eating disorder or a condition requiring individualized nutrition care. Otherwise consult a qualified professional.</span>
+          </label>
+          <Input value={brief} onChange={(e) => setBrief(e.target.value)} maxLength={500}
+            placeholder="Your schedule, equipment, injuries and food preferences" aria-label="Plan preferences" />
+          <div className="flex flex-wrap items-center gap-3">
+            <Button type="button" onClick={calculate} disabled={busy}>Preview estimate</Button>
+            {preview && <span className="text-sm text-mist">Resting {preview.resting_kcal} × {preview.activity_factor} ≈ {preview.target_kcal} kcal/day maintenance</span>}
+            <Button type="button" onClick={generate} disabled={busy || !preview}>Create weekly plan</Button>
+          </div>
+        </div>
       </Card>
 
       {activeTraining && (
@@ -179,7 +255,7 @@ export default function Plan({ userId }: { userId: string }) {
           <p className="text-sm text-mist">{activeNutrition.summary}</p>
           <div className="mt-3 grid grid-cols-3 gap-2 text-center sm:grid-cols-6">
             {([
-              ["kcal", activeNutrition.payload.target_kcal],
+              ["Maintenance kcal (est.)", activeNutrition.payload.target_kcal],
               ["Protein", activeNutrition.payload.protein_g],
               ["Carbs", activeNutrition.payload.carbs_g],
               ["Fat", activeNutrition.payload.fat_g],

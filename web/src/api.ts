@@ -117,10 +117,10 @@ export interface ResolvedItem {
   name: string;
   grams: number;
   kcal: number;
-  protein_g: number;
-  carbs_g: number;
-  fat_g: number;
-  fiber_g: number;
+  protein_g: number | null;
+  carbs_g: number | null;
+  fat_g: number | null;
+  fiber_g: number | null;
   source: string; // "fatsecret" | "estimate" | "template" (client-side)
 }
 
@@ -130,7 +130,12 @@ export interface MealCompute {
   total_protein_g: number;
   total_carbs_g: number;
   total_fat_g: number;
-  total_fiber_g: number;
+  total_fiber_g: number | null;
+}
+
+export interface PhotoEstimate {
+  items: Omit<ResolvedItem, "source">[];
+  uncertainty: string;
 }
 
 export interface Run {
@@ -156,6 +161,12 @@ export interface Program {
   payload: Record<string, unknown>;
   created_at: string;
   activated_at: string | null;
+}
+
+export interface EnergyInputs {
+  equation: "female" | "male";
+  activity: "sedentary" | "light" | "moderate" | "very_active";
+  safety_confirmed: true;
 }
 
 export interface Memory {
@@ -308,6 +319,17 @@ export const api = {
     request<Meal>("PUT", `/users/${id}/meals/${mealId}`, body),
   computeMeal: (id: string, items: { name: string; grams: number }[]) =>
     request<MealCompute>("POST", `/users/${id}/meals/compute`, { items }),
+  photoMeal: async (id: string, file: File): Promise<PhotoEstimate> => {
+    const headers: Record<string, string> = { "Content-Type": file.type };
+    const token = getToken();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(`/users/${id}/meals/photo`, { method: "POST", headers, body: file });
+    if (!response.ok) {
+      const payload = await response.json().catch(() => null);
+      throw new ApiError(response.status, payload?.detail || `Photo analysis failed (${response.status})`);
+    }
+    return response.json();
+  },
   deleteMeal: (id: string, mealId: number) => request<void>("DELETE", `/users/${id}/meals/${mealId}`),
   intake: (id: string, days: number) => request<DayIntake[]>("GET", `/users/${id}/intake?days=${days}`),
 
@@ -347,10 +369,12 @@ export const api = {
     request<Program[]>("GET", `/users/${id}/programs${status ? `?status=${status}` : ""}`),
   generateProgram: (id: string, kind: string, brief?: string) =>
     request<Program>("POST", `/users/${id}/programs/generate`, { kind, brief: brief || null }),
-  planWeek: (id: string, brief?: string) =>
-    request<{ training: Program; nutrition: Program }>("POST", `/users/${id}/plans/weekly`, { brief: brief || null }),
-  reviseProgram: (id: string, programId: number, feedback: string) =>
-    request<Program>("POST", `/users/${id}/programs/${programId}/revise`, { feedback }),
+  planWeek: (id: string, brief?: string, energy?: EnergyInputs) =>
+    request<{ training: Program; nutrition: Program }>("POST", `/users/${id}/plans/weekly`, { brief: brief || null, energy }),
+  energyEstimate: (id: string, energy: EnergyInputs) =>
+    request<{ target_kcal: number; resting_kcal: number; activity_factor: number }>("POST", `/users/${id}/energy-estimate`, energy),
+  reviseProgram: (id: string, programId: number, feedback: string, energy?: EnergyInputs) =>
+    request<Program>("POST", `/users/${id}/programs/${programId}/revise`, { feedback, energy }),
   activateProgram: (id: string, programId: number) =>
     request<Program>("POST", `/users/${id}/programs/${programId}/activate`),
   reviewProgram: (id: string, programId: number, regenerate = false) =>

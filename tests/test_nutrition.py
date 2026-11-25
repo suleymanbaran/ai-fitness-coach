@@ -8,9 +8,9 @@ import pytest
 from fastapi import HTTPException
 
 from app.nutrition import PER_100G_RE, MealItemQuery, resolve_items
-from app.main import update_meal
+from app.main import compute_meal, update_meal
 from app.rag.generator import LLMReply, LLMUsage
-from app.schemas import MealUpdate
+from app.schemas import MealComputeIn, MealUpdate
 
 DESC = "Per 100g - Calories: 389kcal | Fat: 7.20g | Carbs: 66.30g | Protein: 16.90g"
 
@@ -58,7 +58,7 @@ def test_per100g_regex():
 
 
 def test_resolve_mixes_fatsecret_and_one_estimate_call():
-    fs = FakeFS({"oats": [SimpleNamespace(description=DESC)]})
+    fs = FakeFS({"oats": [SimpleNamespace(name="oats", description=DESC)]})
     coach = EstCoach({"whey": WHEY, "peanut butter": WHEY})
     items = [
         MealItemQuery("oats", 50),
@@ -70,6 +70,7 @@ def test_resolve_mixes_fatsecret_and_one_estimate_call():
     assert out[0].source == "fatsecret"
     assert out[0].kcal == pytest.approx(194.5)
     assert out[0].protein_g == pytest.approx(8.45, abs=0.06)  # rounded to 1 decimal
+    assert out[0].fiber_g is None  # search summary does not contain fiber
     assert coach.calls == 1  # both misses batched into ONE estimate call
     assert out[1].source == "estimate"
     assert out[1].kcal == pytest.approx(117.0)
@@ -78,6 +79,21 @@ def test_resolve_mixes_fatsecret_and_one_estimate_call():
 def test_resolve_without_any_source_raises():
     with pytest.raises(ValueError, match="no nutrition source"):
         resolve_items([MealItemQuery("mystery", 100)])
+
+
+def test_search_match_must_be_exact_and_duplicate_items_are_resolved():
+    fs = FakeFS({"oats": [SimpleNamespace(name="oat cookies", description=DESC)]})
+    coach = EstCoach({"oats": WHEY})
+    result = resolve_items([MealItemQuery("oats", 50), MealItemQuery("oats", 100)], fatsecret=fs, coach=coach)
+    assert [r.source for r in result] == ["estimate", "estimate"]
+    assert [r.kcal for r in result] == [195, 390]
+
+
+@pytest.mark.parametrize("value", [-1, float("nan"), 1001])
+def test_invalid_model_nutrition_is_not_returned(value):
+    coach = EstCoach({"whey": {**WHEY, "kcal_per_100g": value}})
+    with pytest.raises(ValueError, match="invalid values"):
+        resolve_items([MealItemQuery("whey", 100)], coach=coach)
 
 
 def test_compute_endpoint_requires_resolvable_items(fakes):
@@ -92,6 +108,21 @@ def test_compute_endpoint_requires_resolvable_items(fakes):
     # validation still applies
     assert fakes.client.post("/users/u1/meals/compute", json={"items": []}).status_code == 422
     assert fakes.client.post("/users/u1/meals/compute", json={"items": [{"name": "x", "grams": 0}]}).status_code == 422
+
+
+def test_compute_endpoint_does_not_copy_fatsecret_search_data(monkeypatch):
+    seen = []
+    def fake_resolve(items, **kwargs):
+        seen.append(kwargs)
+        return resolve_items(items, coach=EstCoach({"whey": WHEY}))
+    monkeypatch.setattr("app.main.resolve_items", fake_resolve)
+    db = SimpleNamespace(get=lambda *_: object(), commit=lambda: None)
+    out = compute_meal(
+        MealComputeIn(items=[{"name": "whey", "grams": 100}]),
+        user_id="u1", db=db, current=None, coach=object(),
+    )
+    assert out.items[0].source == "estimate"
+    assert "fatsecret" not in seen[0]
 
 
 def test_update_meal_refreshes_totals_and_rejects_external_diary_entries(monkeypatch):

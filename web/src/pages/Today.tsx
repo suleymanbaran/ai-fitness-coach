@@ -11,7 +11,6 @@ function CalorieRing({ eaten, target }: { eaten: number; target: number | null }
   const radius = (size - stroke) / 2;
   const circumference = 2 * Math.PI * radius;
   const fraction = target ? Math.min(eaten / target, 1) : 0;
-  const over = target != null && eaten > target;
   return (
     <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} className="-rotate-90">
@@ -28,7 +27,7 @@ function CalorieRing({ eaten, target }: { eaten: number; target: number | null }
             cy={size / 2}
             r={radius}
             fill="none"
-            stroke={over ? "#fb7185" : "url(#ringGrad)"}
+            stroke="url(#ringGrad)"
             strokeWidth={stroke}
             strokeLinecap="round"
             strokeDasharray={`${fraction * circumference} ${circumference}`}
@@ -38,7 +37,7 @@ function CalorieRing({ eaten, target }: { eaten: number; target: number | null }
       <div className="absolute flex flex-col items-center">
         <Flame className="mb-1 h-5 w-5 text-ember" />
         <span className="font-grotesk text-3xl font-bold tabular-nums text-cloud">{eaten.toLocaleString()}</span>
-        <span className="text-xs text-mist">{target ? `of ${target.toLocaleString()} kcal` : "kcal today"}</span>
+        <span className="text-xs text-mist">{target ? `maintenance ≈ ${target.toLocaleString()}` : "kcal today"}</span>
       </div>
     </div>
   );
@@ -146,7 +145,7 @@ export default function Today({ userId }: { userId: string }) {
             <CalorieRing eaten={eatenToday} target={nutritionTarget} />
           </div>
           {!nutritionTarget && (
-            <p className="text-center text-xs text-mist">Activate a nutrition program to see a target ring.</p>
+            <p className="text-center text-xs text-mist">Use the Plan page to estimate maintenance.</p>
           )}
         </Card>
 

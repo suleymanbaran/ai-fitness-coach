@@ -92,20 +92,31 @@ class WeeklyPlanOutput(BaseModel):
     nutrition: NutritionPlan
 
 
+class EnergyInputs(BaseModel):
+    """Explicit user selections; never inferred from chat or profile identity."""
+
+    equation: Literal["female", "male"]
+    activity: Literal["sedentary", "light", "moderate", "very_active"]
+    safety_confirmed: Literal[True]
+
+
 class WeeklyPlanIn(BaseModel):
     brief: str | None = Field(
         None, max_length=500,
         examples=["4 days/week, home gym with rack + dumbbells, fat loss while keeping strength"],
     )
+    energy: EnergyInputs | None = None
 
 
 class ReviseIn(BaseModel):
     feedback: str = Field(..., min_length=3, max_length=1000, examples=["Mondays no longer work — move the session to Saturday"])
+    energy: EnergyInputs | None = None
 
 
 class GenerateProgramIn(BaseModel):
     kind: ProgramKind
     brief: str | None = Field(None, max_length=500, examples=["4 days/week, home gym, focus on squat strength"])
+    energy: EnergyInputs | None = None
 
 
 class ProgramOut(BaseModel):

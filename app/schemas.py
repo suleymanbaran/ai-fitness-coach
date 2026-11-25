@@ -133,7 +133,7 @@ class ResolvedItemOut(BaseModel):
     protein_g: float
     carbs_g: float
     fat_g: float
-    fiber_g: float
+    fiber_g: float | None
     source: str  # "fatsecret" | "estimate"
 
 
@@ -143,7 +143,24 @@ class MealComputeOut(BaseModel):
     total_protein_g: float
     total_carbs_g: float
     total_fat_g: float
-    total_fiber_g: float
+    total_fiber_g: float | None
+
+
+class PhotoItem(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    name: str = Field(..., min_length=1, max_length=120)
+    grams: float = Field(..., gt=0, le=2000)
+    kcal: float = Field(..., ge=0, le=10000)
+    protein_g: float | None = Field(..., ge=0, le=1000)
+    carbs_g: float | None = Field(..., ge=0, le=1000)
+    fat_g: float | None = Field(..., ge=0, le=1000)
+    fiber_g: float | None = Field(..., ge=0, le=300)
+
+
+class PhotoEstimate(BaseModel):
+    items: list[PhotoItem] = Field(..., max_length=20)
+    uncertainty: str = Field(..., max_length=1000)
 
 
 class RunIn(BaseModel):

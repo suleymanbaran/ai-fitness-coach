@@ -12,6 +12,7 @@ from app.rag.tools import build_ask_tools
 from tests.fakes import FakeCoach
 
 TODAY = date.today()
+ENERGY = {"equation": "male", "activity": "sedentary", "safety_confirmed": True}
 
 VALID_TRAINING = {
     "name": "4-Day Strength",
@@ -37,11 +38,11 @@ VALID_TRAINING = {
 }
 
 VALID_NUTRITION = {
-    "name": "Cut at 2200",
-    "summary": "2200 kcal, 160 g protein, 3 meals + 1 snack.",
-    "rationale": "Moderate deficit per [nut-calorie-deficit].",
+    "name": "Maintenance",
+    "summary": "2163 kcal, 150 g protein, 3 meals + 1 snack.",
+    "rationale": "Estimated maintenance.",
     "plan": {
-        "target_kcal": 2200, "protein_g": 160, "carbs_g": 200, "fat_g": 70,
+        "target_kcal": 2163, "protein_g": 150, "carbs_g": 250, "fat_g": 62,
         "meals": [{"name": "Breakfast", "items": "Oats + whey", "kcal": 500}],
         "guidelines": ["2.5 L water", "Protein at every meal"],
     },
@@ -51,8 +52,8 @@ VALID_NUTRITION = {
 VALID_WEEKLY = {
     "training_name": "Weekly Strength + Cardio",
     "training_summary": "4 strength days + 2 zone-2 cardio sessions, RPE 7-8.",
-    "nutrition_name": "Balanced 2400",
-    "nutrition_summary": "2400 kcal, 170 g protein, carbs around training.",
+    "nutrition_name": "Balanced maintenance",
+    "nutrition_summary": "2163 kcal, 150 g protein, carbs around training.",
     "rationale": "Coherent plan per goal and metrics.",
     "training": VALID_TRAINING["plan"],
     "nutrition": VALID_NUTRITION["plan"],
@@ -100,6 +101,8 @@ def plan_app(fakes):
 
 def generate(client, kind="training", brief=None):
     body = {"kind": kind}
+    if kind == "nutrition":
+        body["energy"] = ENERGY
     if brief:
         body["brief"] = brief
     return client.post("/users/u1/programs/generate", json=body)
@@ -285,13 +288,14 @@ def test_exercise_history_endpoint_and_tool(plan_app):
 
 def test_weekly_plan_generates_and_activates_both(plan_app):
     client = plan_app.client
-    r = client.post("/users/u1/plans/weekly", json={"brief": "4 days/week, fat loss"})
+    r = client.post("/users/u1/plans/weekly", json={"brief": "4 days/week, fat loss", "energy": ENERGY})
     assert r.status_code == 200
     body = r.json()
     assert body["training"]["kind"] == "training" and body["training"]["status"] == "active"
     assert body["nutrition"]["kind"] == "nutrition" and body["nutrition"]["status"] == "active"
     assert body["training"]["version"] == 1 and body["nutrition"]["version"] == 1
-    assert body["nutrition"]["payload"]["target_kcal"] == 2200
+    assert body["nutrition"]["payload"]["target_kcal"] == 2163
+    assert body["nutrition"]["payload"]["energy_calculation"]["method"] == "mifflin_st_jeor_maintenance"
 
     # The weekly task instructions and both protocol categories reached the model.
     call = plan_app.coach.calls[0]
@@ -303,7 +307,7 @@ def test_weekly_plan_generates_and_activates_both(plan_app):
     client.post("/ask", json={"user_id": "u1", "question": "What is my plan?"})
     stable = plan_app.coach.answer_call.stable
     assert "Weekly Strength + Cardio" in stable
-    assert "Balanced 2400" in stable
+    assert "Estimated maintenance" in stable
 
 
 def test_revise_endpoint_creates_and_activates_next_version(plan_app):
@@ -454,10 +458,10 @@ def test_create_weekly_plan_tool(plan_app):
     ctx = PlanContext(coach=plan_app.coach, embedder=FakeEmbedder(), store=plan_app.store)
     _, handlers = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None), None, plan_ctx=ctx)
     result = handlers["create_weekly_plan"]({"brief": "4 days, knee-friendly"})
-    assert "weekly plan created and activated" in result
+    assert "energy estimate form" in result
 
     active = plan_app.client.get("/users/u1/programs?status=active").json()
-    assert {p["kind"] for p in active} == {"training", "nutrition"}
+    assert not active
 
     _, no_ctx = build_ask_tools(plan_app.db, "u1", Settings(_env_file=None))
     assert no_ctx["create_weekly_plan"]({}).startswith("error: weekly planning is not available")

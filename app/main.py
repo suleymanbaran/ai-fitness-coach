@@ -9,6 +9,7 @@ from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request, Respo
 from openai import APIError, OpenAI
 from qdrant_client import QdrantClient
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.auth import RateLimiter, authorize, current_user_id, get_ask_limiter
 from app.config import Settings, get_settings
@@ -61,11 +62,13 @@ from app.programs.routes import router as programs_router
 from app.programs.service import active_programs_summary, list_workouts
 from app.rag.demo import DemoCoach, HashingEmbedder
 from app.rag.extraction import run_memory_extraction
+from app.rag.energy_safety import energy_answer, is_energy_target_question
 from app.rag.embeddings import Embedder
 from app.rag.generator import CoachClient
 from app.rag.ingestion import ingest_protocols
 from app.data_access.runs import add_run, delete_run, list_runs
 from app.nutrition import MealItemQuery, resolve_items
+from app.photo_nutrition import MAX_PHOTO_BYTES, analyze_photo, prepare_photo
 from app.rag.prompt import build_prompt, format_intake, format_runs, format_templates, format_workouts
 from app.rag.tools import PlanContext, build_ask_tools
 from app.rag.vector_store import ProtocolStore, connect_qdrant
@@ -84,6 +87,7 @@ from app.schemas import (
     MemoryIn,
     MemoryKind,
     ProfileIn,
+    PhotoEstimate,
     ResolvedItemOut,
     RunIn,
     RunOut,
@@ -92,6 +96,7 @@ from app.schemas import (
 )
 
 logger = logging.getLogger("fitness_coach")
+photo_limiter = RateLimiter()
 
 
 @asynccontextmanager
@@ -237,6 +242,12 @@ def ask(
     user = get_user(db, payload.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail=f"User {payload.user_id} not found")
+    if is_energy_target_question(payload.question):
+        answer = energy_answer(user, payload.question)
+        append_message(db, payload.user_id, payload.channel, "user", payload.question)
+        append_message(db, payload.user_id, payload.channel, "assistant", answer)
+        db.commit()
+        return AskResponse(answer=answer, sources=[])
     if not store.is_ready():
         raise HTTPException(status_code=503, detail="Knowledge base is empty. Run: python -m scripts.ingest")
 
@@ -414,10 +425,8 @@ def compute_meal(
     db: Session = Depends(get_db),
     current: str | None = Depends(current_user_id),
     coach: CoachClient = Depends(get_coach),
-    integrations: Integrations = Depends(get_integrations),
 ) -> MealComputeOut:
-    """Turn name+grams item lines into kcal/macros: FatSecret per-100g first, one batched
-    LLM estimate for the rest. The Add-meal form calls this so the user never types numbers."""
+    """Estimate kcal/macros for name+grams item lines in one batched model call."""
     authorize(user_id, current)
     if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
@@ -425,7 +434,6 @@ def compute_meal(
     try:
         resolved = resolve_items(
             items,
-            fatsecret=getattr(integrations, "fatsecret", None),
             coach=coach, db=db, user_id=user_id,
         )
     except ValueError as exc:
@@ -440,8 +448,46 @@ def compute_meal(
         total_protein_g=round(sum(r.protein_g for r in resolved), 1),
         total_carbs_g=round(sum(r.carbs_g for r in resolved), 1),
         total_fat_g=round(sum(r.fat_g for r in resolved), 1),
-        total_fiber_g=round(sum(r.fiber_g for r in resolved), 1),
+        total_fiber_g=round(sum(r.fiber_g for r in resolved if r.fiber_g is not None), 1)
+        if all(r.fiber_g is not None for r in resolved) else None,
     )
+
+
+@app.post("/users/{user_id}/meals/photo", response_model=PhotoEstimate)
+async def photo_meal(
+    request: Request,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+    coach: CoachClient = Depends(get_coach),
+    settings: Settings = Depends(get_settings),
+) -> PhotoEstimate:
+    authorize(user_id, current)
+    if db.get(User, user_id) is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    if settings.demo_mode or not isinstance(coach, CoachClient):
+        raise HTTPException(status_code=503, detail="Photo analysis is unavailable in demo mode.")
+    photo_limiter.check(user_id, settings.photo_rate_limit_per_minute)
+    content_type = request.headers.get("content-type", "").split(";")[0].lower()
+    if content_type not in ("image/jpeg", "image/png", "image/webp"):
+        raise HTTPException(status_code=415, detail="Use JPEG, PNG or WebP.")
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > MAX_PHOTO_BYTES:
+            raise HTTPException(status_code=413, detail="Image exceeds 5 MB.")
+    try:
+        image = await run_in_threadpool(prepare_photo, bytes(data), content_type)
+        del data
+        estimate, reply = await run_in_threadpool(analyze_photo, coach, image)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except APIError as exc:
+        logger.warning("photo analysis failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=502, detail="Photo analysis failed; try again.") from exc
+    record_llm_call(db, user_id, reply.usage, tier="fast", purpose="photo")
+    db.commit()
+    return estimate
 
 
 @app.get("/users/{user_id}/meals", response_model=list[FoodLogOut])

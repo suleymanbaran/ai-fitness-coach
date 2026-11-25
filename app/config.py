@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     tool_max_iterations: int = 6
     # Built-in OpenAI web_search tool ($10/1k calls): used when FatSecret has no match,
     # e.g. local dishes missing from its US-only free database.
-    enable_web_search: bool = True
+    enable_web_search: bool = False
 
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/fitness_coach"
 
@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # (issued by scripts/issue_token.py) and can only touch the token owner's data.
     auth_enabled: bool = False
     ask_rate_limit_per_minute: int = 20
+    photo_rate_limit_per_minute: int = 5
     openai_timeout_seconds: float = 30.0
     # Program generation/review produces long structured output on the plan tier.
     plan_timeout_seconds: float = 180.0
