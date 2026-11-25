@@ -63,6 +63,12 @@ Anyone can ask the coach questions and log days without connecting Google Health
   copied into these persistent logs: its [storable-data policy](https://platform.fatsecret.com/docs/guides/storable-data)
   limits storage of non-ID data. Existing FatSecret diary synchronization and chat integration
   predate this change and need a separate terms/retention review before production use.
+- **Food photos in Telegram:** send a photo to the bot (Telegram-compressed JPEG, up to 5 MB). It
+  uses the same endpoint, limits and low-detail vision call as the web page and replies with the
+  estimated foods, grams and kcal plus the model's uncertainty note. Nothing is saved until you
+  run `/save kahvalti|ogle|aksam|atistirma`; `/fix <no> <gram>` linearly rescales one item
+  (`0` removes it) and `/discard` drops the estimate. The pending estimate is kept in the bot's
+  memory only (lost on restart) and the image is never stored. Unknown macros are saved as unknown.
 - **Programs:** discuss constraints with the coach, then use the React Plan page to explicitly
   select energy inputs, preview the maintenance estimate and create a weekly plan. The plan-tier
   model generates training and nutrition suggestions, but cannot select the calorie target.

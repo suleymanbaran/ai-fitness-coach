@@ -176,6 +176,17 @@ class FakeAPI:
         self._record("review_program", user_id, program_id, regenerate)
         return {"program_id": program_id, "assessment": "## Assessment\nOn track.", "regenerated_version": 4 if regenerate else None}
 
+    def photo_estimate(self, user_id, image, content_type="image/jpeg"):
+        self._record("photo_estimate", user_id, image, content_type)
+        return {"items": [
+            {"name": "Pilav", "grams": 200, "kcal": 260, "protein_g": 5, "carbs_g": 50, "fat_g": 4, "fiber_g": None},
+            {"name": "Tavuk", "grams": 100, "kcal": 165, "protein_g": 31, "carbs_g": None, "fat_g": 4, "fiber_g": 0},
+        ], "uncertainty": "Yağ miktarı belirsiz."}
+
+    def log_meal(self, user_id, **meal):
+        self._record("log_meal", user_id, meal)
+        return {"id": 1, **meal}
+
     def memories(self, user_id):
         self._record("memories", user_id)
         return [{"kind": "constraint", "key": "bad_knee", "value": "No squats", "source": "user", "pinned": True}]
@@ -345,3 +356,69 @@ def test_long_answers_are_chunked():
 
     assert len(message.replies) >= 3
     assert all(len(r) <= 4096 for r in message.replies)
+
+
+class FakePhoto:
+    def __init__(self, size=1000):
+        self.file_size = size
+
+    async def get_file(self):
+        return SimpleNamespace(download_as_bytearray=self._download)
+
+    async def _download(self):
+        return bytearray(b"jpegbytes")
+
+
+def photo_update(size=1000):
+    update, message = make_update()
+    message.photo = [FakePhoto(10), FakePhoto(size)]
+    return update, message
+
+
+def test_photo_is_estimated_then_fixed_and_saved_only_on_confirmation():
+    api = FakeAPI()
+    bot = CoachBot(api, "me", allowed_chat_id=42)
+    update, message = photo_update()
+    run(bot.handle_photo(update, SimpleNamespace(args=[])))
+    assert api.calls[0][:2] == ("photo_estimate", ("me", b"jpegbytes", "image/jpeg"))
+    assert "Henüz kaydedilmedi" in message.replies[0] and "Yağ miktarı belirsiz" in message.replies[0]
+    assert [c[0] for c in api.calls] == ["photo_estimate"]  # nothing logged yet
+
+    fix, fix_message = make_update()
+    run(bot.cmd_fix(fix, SimpleNamespace(args=["1", "100"])))
+    assert "130 kcal" in fix_message.replies[0]
+
+    save, save_message = make_update()
+    run(bot.cmd_save(save, SimpleNamespace(args=["ogle"])))
+    name, (user, meal), _ = api.calls[-1]
+    assert name == "log_meal" and meal["meal"] == "lunch" and meal["kcal"] == 295
+    assert meal["carbs_g"] is None and meal["fiber_g"] is None  # unknown stays unknown, not 0
+    assert meal["protein_g"] == 33.5 and bot.pending_photo is None
+
+
+def test_photo_rejects_oversized_and_unauthorized():
+    api = FakeAPI()
+    bot = CoachBot(api, "me", allowed_chat_id=42)
+    update, message = photo_update(size=6 * 1024 * 1024)
+    run(bot.handle_photo(update, SimpleNamespace(args=[])))
+    assert "5 MB" in message.replies[0] and api.calls == []
+
+    other, other_message = photo_update()
+    other.effective_chat.id = 1
+    run(bot.handle_photo(other, SimpleNamespace(args=[])))
+    assert "Not authorized" in other_message.replies[0] and api.calls == []
+
+
+def test_save_and_fix_without_pending_or_bad_args():
+    api = FakeAPI()
+    bot = CoachBot(api, "me", allowed_chat_id=42)
+    update, message = make_update()
+    run(bot.cmd_save(update, SimpleNamespace(args=["ogle"])))
+    assert "bekleyen" in message.replies[0] and api.calls == []
+
+    run(bot.handle_photo(*(lambda u_m: (u_m[0], SimpleNamespace(args=[])))(photo_update())))
+    update, message = make_update()
+    run(bot.cmd_save(update, SimpleNamespace(args=[])))
+    run(bot.cmd_fix(update, SimpleNamespace(args=["9", "50"])))
+    assert "Öğünü seç" in message.replies[0] and "Kullanım" in message.replies[1]
+    assert all(c[0] != "log_meal" for c in api.calls)

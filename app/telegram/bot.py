@@ -20,6 +20,14 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from app.telegram.api_client import CoachAPI, CoachAPIError
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+MAX_PHOTO_BYTES = 5 * 1024 * 1024
+MEAL_ALIASES = {
+    "breakfast": "breakfast", "kahvalti": "breakfast", "kahvaltı": "breakfast",
+    "lunch": "lunch", "ogle": "lunch", "öğle": "lunch",
+    "dinner": "dinner", "aksam": "dinner", "akşam": "dinner",
+    "snack": "snack", "atistirma": "snack", "atıştırma": "snack",
+}
+MACROS = ("protein_g", "carbs_g", "fat_g", "fiber_g")
 
 
 def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
@@ -51,6 +59,8 @@ class CoachBot:
         self.api = api
         self.user_id = user_id
         self.allowed_chat_id = allowed_chat_id
+        # Unsaved photo estimate, in memory only (never persisted); the image itself is not kept.
+        self.pending_photo: dict | None = None
 
     def register(self, application: Application) -> None:
         application.add_handler(CommandHandler("start", self.cmd_start))
@@ -62,6 +72,10 @@ class CoachBot:
         application.add_handler(CommandHandler("review", self.cmd_review))
         application.add_handler(CommandHandler("memory", self.cmd_memory))
         application.add_handler(CommandHandler("forget", self.cmd_forget))
+        application.add_handler(CommandHandler("fix", self.cmd_fix))
+        application.add_handler(CommandHandler("save", self.cmd_save))
+        application.add_handler(CommandHandler("discard", self.cmd_discard))
+        application.add_handler(MessageHandler(filters.PHOTO, self.handle_photo))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
 
     # ---------- plumbing ----------
@@ -107,6 +121,7 @@ class CoachBot:
             "Just write or speak your mind — I log metrics, meals and workouts from plain text "
             "(\"slept 7h, HRV 55\", \"2 eggs + simit for breakfast\", \"benched 80x5x3\").\n\n"
             "Commands:\n"
+            "Yemek fotoğrafı gönder: bileşenleri ve porsiyonları tahmin ederim; /fix ile düzeltip /save ile kaydedersin.\n"
             "/today — latest metrics, intake and how the day compares to baseline\n"
             "/meals — today's food log\n"
             "/workout — today's planned session\n"
@@ -133,6 +148,114 @@ class CoachBot:
                 f"[{s['protocol_id']}] {s['title']} ({s['score']:.2f})" for s in result["sources"]
             )
         await self._reply(update, escape_html(text))
+
+    @staticmethod
+    def _photo_summary(pending: dict) -> str:
+        items = pending["items"]
+        lines = [
+            f"{i}. {it['name']} — {it['grams']:g} g, ~{it['kcal']:.0f} kcal" for i, it in enumerate(items, 1)
+        ]
+        total = f"Toplam: ~{sum(it['kcal'] for it in items):.0f} kcal"
+        for label, key in (("P", "protein_g"), ("K", "carbs_g"), ("Y", "fat_g")):
+            values = [it[key] for it in items]
+            total += f", {label} {sum(values):.0f} g" if all(v is not None for v in values) else f", {label} —"
+        text = "Fotoğraf tahmini (kesin değil):\n" + "\n".join(lines) + "\n" + total
+        if pending.get("uncertainty"):
+            text += f"\n\nBelirsizlik: {pending['uncertainty']}"
+        text += (
+            "\n\nHenüz kaydedilmedi. Gram düzeltmek için /fix <no> <gram> (0 = çıkar), "
+            "kaydetmek için /save kahvalti|ogle|aksam|atistirma, vazgeçmek için /discard."
+        )
+        return text
+
+    async def handle_photo(self, update: Update, context) -> None:
+        if not await self._authorized(update):
+            return
+        photo = update.effective_message.photo[-1]
+        if photo.file_size is not None and photo.file_size > MAX_PHOTO_BYTES:
+            await self._reply(update, escape_html("Fotoğraf 5 MB'tan büyük; daha küçük bir fotoğraf gönder."))
+            return
+        await update.effective_chat.send_action(ChatAction.TYPING)
+        try:
+            file = await photo.get_file()
+            data = bytes(await file.download_as_bytearray())
+        except Exception as exc:
+            await self._reply(update, escape_html(f"Fotoğraf indirilemedi ({type(exc).__name__}); tekrar dene."))
+            return
+        estimate = await self._call(update, self.api.photo_estimate, self.user_id, data, "image/jpeg")
+        del data
+        if estimate is None:
+            return
+        if not estimate.get("items"):
+            self.pending_photo = None
+            await self._reply(update, escape_html("Fotoğrafta tanınabilir bir yemek bulamadım. Daha net bir fotoğraf dene veya yazarak anlat."))
+            return
+        self.pending_photo = {"items": estimate["items"], "uncertainty": estimate.get("uncertainty", "")}
+        await self._reply(update, escape_html(self._photo_summary(self.pending_photo)))
+
+    async def cmd_fix(self, update: Update, context) -> None:
+        if not await self._authorized(update):
+            return
+        args = list(context.args or [])
+        pending = self.pending_photo
+        if pending is None:
+            await self._reply(update, escape_html("Düzeltilecek bekleyen bir fotoğraf tahmini yok."))
+            return
+        try:
+            index, grams = int(args[0]), float(args[1].replace(",", "."))
+            if not 1 <= index <= len(pending["items"]) or not 0 <= grams <= 2000 or len(args) != 2:
+                raise ValueError
+        except (IndexError, ValueError):
+            await self._reply(update, escape_html("Kullanım: /fix <no> <gram> (0-2000 g; 0 öğeyi çıkarır)."))
+            return
+        item = pending["items"][index - 1]
+        if grams == 0:
+            pending["items"].pop(index - 1)
+        else:
+            # Linear rescale of the model's per-portion estimate; unknown macros stay unknown.
+            factor = grams / item["grams"]
+            item["kcal"] *= factor
+            for key in MACROS:
+                if item.get(key) is not None:
+                    item[key] *= factor
+            item["grams"] = grams
+        if not pending["items"]:
+            self.pending_photo = None
+            await self._reply(update, escape_html("Tüm öğeler çıkarıldı; tahmin silindi."))
+            return
+        await self._reply(update, escape_html(self._photo_summary(pending)))
+
+    async def cmd_save(self, update: Update, context) -> None:
+        if not await self._authorized(update):
+            return
+        pending = self.pending_photo
+        if pending is None:
+            await self._reply(update, escape_html("Kaydedilecek bekleyen bir fotoğraf tahmini yok."))
+            return
+        args = list(context.args or [])
+        meal = MEAL_ALIASES.get(args[0].lower()) if len(args) == 1 else None
+        if meal is None:
+            await self._reply(update, escape_html("Öğünü seç: /save kahvalti, ogle, aksam veya atistirma."))
+            return
+        items = pending["items"]
+        payload = {
+            "meal": meal,
+            "description": ("Fotoğraf tahmini: " + ", ".join(f"{it['name']} {it['grams']:g} g" for it in items))[:200],
+            "kcal": round(sum(it["kcal"] for it in items)),
+        }
+        for key in MACROS:  # a missing value is never stored as zero
+            values = [it[key] for it in items]
+            payload[key] = round(sum(values), 1) if all(v is not None for v in values) else None
+        if await self._call(update, self.api.log_meal, self.user_id, **payload) is None:
+            return  # keep the estimate so the user can retry
+        self.pending_photo = None
+        await self._reply(update, escape_html(f"Kaydedildi: ~{payload['kcal']} kcal ({meal}). Tahmindir, kesin ölçüm değildir."))
+
+    async def cmd_discard(self, update: Update, context) -> None:
+        if not await self._authorized(update):
+            return
+        self.pending_photo = None
+        await self._reply(update, escape_html("Fotoğraf tahmini silindi."))
 
     async def cmd_today(self, update: Update, context) -> None:
         if not await self._authorized(update):
