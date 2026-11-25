@@ -172,11 +172,6 @@ export default function CalendarPage({ userId }: { userId: string }) {
             const planned = dayType === "strength" || dayType === "mixed" || dayType === "cardio";
             const missed = planned && !isFuture && !hasWorkout && !hasRun;
 
-            let kcalClass = "text-mist";
-            if (kcal != null && targetKcal != null) {
-              kcalClass = kcal <= targetKcal * 1.05 ? "text-lime" : kcal <= targetKcal * 1.15 ? "text-amber" : "text-magenta";
-            }
-
             return (
               <button
                 key={dateStr}
@@ -199,7 +194,7 @@ export default function CalendarPage({ userId }: { userId: string }) {
                   )}
                 </div>
                 {(kcal != null || (planDay != null && targetKcal != null)) && (
-                  <div className={`mt-1 text-[11px] tabular-nums ${kcalClass}`} title="kcal taken / target">
+                  <div className="mt-1 text-[11px] tabular-nums text-mist" title="kcal eaten / estimated maintenance">
                     {kcal != null ? (
                       <>
                         {kcal.toLocaleString()}
@@ -246,8 +241,8 @@ export default function CalendarPage({ userId }: { userId: string }) {
           <span><span className="text-lime">✓</span> workout or run logged</span>
           <span><span className="text-magenta">✗ planned</span> session missed</span>
           <span><span className="text-lime">♥ cardio</span> planned — with ✓ when a run was logged</span>
-          <span>kcal <span className="text-lime">green</span> ≤ target, <span className="text-amber">amber</span> ≤ +15%, <span className="text-magenta">red</span> above</span>
-          {planDays.length !== 7 && <span>Ask for a weekly plan on Telegram to see day types here.</span>}
+          <span>Calories are shown against estimated maintenance, not a medical target.</span>
+          {planDays.length !== 7 && <span>Create a weekly plan on the Plan page to see day types here.</span>}
         </div>
       </Card>
 
@@ -286,14 +281,8 @@ export default function CalendarPage({ userId }: { userId: string }) {
             </span>
           )}
           {selIntake && targetKcal != null && (
-            <span
-              className={`rounded-full px-2 py-0.5 font-medium ${
-                selIntake.kcal <= targetKcal ? "bg-lime/15 text-lime" : "bg-magenta/15 text-magenta"
-              }`}
-            >
-              {selIntake.kcal <= targetKcal
-                ? `${(targetKcal - selIntake.kcal).toLocaleString()} kcal under target`
-                : `${(selIntake.kcal - targetKcal).toLocaleString()} kcal over target`}
+            <span className="rounded-full bg-white/5 px-2 py-0.5 font-medium text-mist">
+              Estimated maintenance ≈ {targetKcal.toLocaleString()} kcal
             </span>
           )}
         </div>
@@ -348,7 +337,7 @@ export default function CalendarPage({ userId }: { userId: string }) {
               </span>
               <span className="text-ash"> / {STEP_GOAL.toLocaleString()} goal</span>
             </p>
-            <h3 className="mb-2 mt-4 text-xs font-semibold text-ash">Nutrition (taken / target)</h3>
+            <h3 className="mb-2 mt-4 text-xs font-semibold text-ash">Nutrition (eaten / estimate)</h3>
             <div className="space-y-1">
               {targetRow("Calories", selIntake?.kcal, targetKcal, "kcal")}
               {targetRow("Protein", selIntake?.protein_g, num("protein_g"))}

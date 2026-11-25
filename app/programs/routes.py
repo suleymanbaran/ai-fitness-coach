@@ -15,12 +15,14 @@ from app.data_access.templates import (
     seed_workout_templates,
     upsert_workout_template,
 )
+from app.data_access.memory import list_memories
 from app.data_access.users import UserProfile, get_user
 from app.db.session import get_db
 from app.deps import get_coach, get_embedder, get_store
 from app.programs import service
 from app.programs.schemas import (
     ExerciseHistoryRow,
+    EnergyInputs,
     GenerateProgramIn,
     ProgramOut,
     ReviseIn,
@@ -46,6 +48,35 @@ def _require_user(db: Session, user_id: str) -> UserProfile:
     return user
 
 
+def _program_out(program) -> ProgramOut:
+    out = ProgramOut.model_validate(program, from_attributes=True)
+    if out.kind == "nutrition" and not out.payload.get("energy_calculation"):
+        payload = {**out.payload, "target_kcal": None}
+        return out.model_copy(update={
+            "name": "Older nutrition plan (unverified)",
+            "summary": "Energy target unverified. Create a new estimate on the Plan page.",
+            "rationale": None,
+            "payload": payload,
+        })
+    return out
+
+
+@router.post("/users/{user_id}/energy-estimate")
+def energy_estimate(
+    body: EnergyInputs,
+    user_id: str = Path(..., pattern=USER_ID_PATTERN),
+    db: Session = Depends(get_db),
+    current: str | None = Depends(current_user_id),
+) -> dict:
+    authorize(user_id, current)
+    user = _require_user(db, user_id)
+    try:
+        service.check_nutrition_safety(None, list_memories(db, user_id))
+        return service.calculate_energy(user, body)
+    except service.ProgramInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.post("/users/{user_id}/programs/generate", response_model=ProgramOut)
 def generate(
     body: GenerateProgramIn,
@@ -62,12 +93,14 @@ def generate(
     if not store.is_ready():
         raise HTTPException(status_code=503, detail="Knowledge base is empty. Run: python -m scripts.ingest")
     try:
-        program = service.generate_program(db, coach, embedder, store, user, body.kind, body.brief, settings)
+        program = service.generate_program(db, coach, embedder, store, user, body.kind, body.brief, settings, body.energy)
+    except service.ProgramInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except service.ProgramGenerationError:
         raise HTTPException(
             status_code=502, detail="Program generation failed schema validation twice. Try again in a moment."
         ) from None
-    return ProgramOut.model_validate(program, from_attributes=True)
+    return _program_out(program)
 
 
 @router.get("/users/{user_id}/programs", response_model=list[ProgramOut])
@@ -79,7 +112,7 @@ def programs(
 ) -> list[ProgramOut]:
     authorize(user_id, current)
     _require_user(db, user_id)
-    return [ProgramOut.model_validate(p, from_attributes=True) for p in service.list_programs(db, user_id, status)]
+    return [_program_out(p) for p in service.list_programs(db, user_id, status)]
 
 
 @router.get("/users/{user_id}/programs/{program_id}", response_model=ProgramOut)
@@ -93,7 +126,7 @@ def program_detail(
     program = service.get_program(db, user_id, program_id)
     if program is None:
         raise HTTPException(status_code=404, detail="Program not found")
-    return ProgramOut.model_validate(program, from_attributes=True)
+    return _program_out(program)
 
 
 @router.post("/users/{user_id}/plans/weekly")
@@ -113,14 +146,16 @@ def plan_week(
     if not store.is_ready():
         raise HTTPException(status_code=503, detail="Knowledge base is empty. Run: python -m scripts.ingest")
     try:
-        training, nutrition = service.generate_weekly_plan(db, coach, embedder, store, user, body.brief, settings)
+        training, nutrition = service.generate_weekly_plan(db, coach, embedder, store, user, body.brief, settings, body.energy)
+    except service.ProgramInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except service.ProgramGenerationError:
         raise HTTPException(
             status_code=502, detail="Weekly plan generation failed schema validation twice. Try again in a moment."
         ) from None
     return {
-        "training": ProgramOut.model_validate(training, from_attributes=True),
-        "nutrition": ProgramOut.model_validate(nutrition, from_attributes=True),
+        "training": _program_out(training),
+        "nutrition": _program_out(nutrition),
     }
 
 
@@ -143,10 +178,12 @@ def revise(
     if program is None:
         raise HTTPException(status_code=404, detail="Program not found")
     try:
-        revised = service.revise_program(db, coach, embedder, store, user, program, body.feedback, settings)
+        revised = service.revise_program(db, coach, embedder, store, user, program, body.feedback, settings, body.energy)
+    except service.ProgramInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except service.ProgramGenerationError:
         raise HTTPException(status_code=502, detail="Revision failed schema validation twice. Try again.") from None
-    return ProgramOut.model_validate(revised, from_attributes=True)
+    return _program_out(revised)
 
 
 @router.post("/users/{user_id}/programs/{program_id}/activate", response_model=ProgramOut)
@@ -160,7 +197,7 @@ def activate(
     program = service.activate_program(db, user_id, program_id)
     if program is None:
         raise HTTPException(status_code=404, detail="Program not found")
-    return ProgramOut.model_validate(program, from_attributes=True)
+    return _program_out(program)
 
 
 @router.post("/users/{user_id}/programs/{program_id}/review", response_model=ReviewOut)
@@ -180,6 +217,8 @@ def review(
     program = service.get_program(db, user_id, program_id)
     if program is None:
         raise HTTPException(status_code=404, detail="Program not found")
+    if program.kind == "nutrition":
+        raise HTTPException(status_code=422, detail="Use the Plan page to make a new nutrition estimate.")
     assessment = service.review_program(db, coach, program, user, settings)
 
     new_version = None
@@ -188,6 +227,8 @@ def review(
         try:
             new_program = service.generate_program(db, coach, embedder, store, user, program.kind, brief, settings)
             new_version = new_program.version
+        except service.ProgramInputError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except service.ProgramGenerationError:
             raise HTTPException(
                 status_code=502, detail="Review succeeded but regeneration failed validation. Try again."

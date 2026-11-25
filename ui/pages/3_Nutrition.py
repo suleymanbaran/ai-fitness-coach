@@ -73,7 +73,7 @@ if intake:
     st.bar_chart(frame[["kcal"]], height=220)
     if target:
         avg = frame["kcal"].mean()
-        st.metric("Average vs target", f"{avg:.0f} kcal", delta=f"{avg - target:+.0f} vs {target} kcal", delta_color="off")
+        st.metric("Average vs estimated maintenance", f"{avg:.0f} kcal", delta=f"{avg - target:+.0f} vs {target} kcal", delta_color="off")
     protein_days = frame["protein_g"].dropna()
     if not protein_days.empty:
         st.caption(f"Average protein: {protein_days.mean():.0f} g/day")
@@ -88,7 +88,7 @@ if nutrition:
     st.subheader(f"Active plan: {nutrition['name']} (v{nutrition['version']})")
     payload = nutrition["payload"]
     cols = st.columns(4)
-    cols[0].metric("Target", f"{payload.get('target_kcal')} kcal")
+    cols[0].metric("Estimated maintenance", f"{payload.get('target_kcal') or '—'} kcal")
     cols[1].metric("Protein", f"{payload.get('protein_g')} g")
     cols[2].metric("Carbs", f"{payload.get('carbs_g')} g")
     cols[3].metric("Fat", f"{payload.get('fat_g')} g")
@@ -101,16 +101,4 @@ else:
     st.subheader("Nutrition plan")
     st.info("No active nutrition program.")
 
-with st.expander("Generate a nutrition program"):
-    brief = st.text_input("Brief (optional)", placeholder="Mediterranean style, lunch at work, target fat loss", key="nut_brief")
-    if st.button("Generate (plan model, ~30s)", type="primary"):
-        with st.spinner("Designing your nutrition plan..."):
-            r = api_call("POST", f"/users/{user_id}/programs/generate", json={"kind": "nutrition", "brief": brief or None})
-        if r.is_error:
-            fail(r, "Generation")
-        else:
-            program = r.json()
-            activate = api_call("POST", f"/users/{user_id}/programs/{program['id']}/activate")
-            if activate.is_error:
-                fail(activate, "Activation")
-            st.rerun()
+st.info("Use the React Plan page to review an energy estimate and generate a nutrition plan.")

@@ -7,6 +7,7 @@ costs a single cheap luna call when FatSecret misses (which it often does for no
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 
@@ -68,17 +69,17 @@ class ResolvedItem:
     protein_g: float
     carbs_g: float
     fat_g: float
-    fiber_g: float
+    fiber_g: float | None
     source: str  # "fatsecret" | "estimate"
 
 
-def _scale(name: str, grams: float, per100: tuple[float, float, float, float, float], source: str) -> ResolvedItem:
+def _scale(name: str, grams: float, per100: tuple[float, float, float, float, float | None], source: str) -> ResolvedItem:
     kcal, protein, carbs, fat, fiber = per100
     f = grams / 100.0
     return ResolvedItem(
         name=name, grams=grams,
         kcal=round(kcal * f, 1), protein_g=round(protein * f, 1), carbs_g=round(carbs * f, 1),
-        fat_g=round(fat * f, 1), fiber_g=round(fiber * f, 1), source=source,
+        fat_g=round(fat * f, 1), fiber_g=round(fiber * f, 1) if fiber is not None else None, source=source,
     )
 
 
@@ -87,14 +88,17 @@ def _from_fatsecret(fatsecret, query: MealItemQuery) -> ResolvedItem | None:
         return None
     try:
         hits = fatsecret.search_foods(None, None, query.name)
-    except Exception:  # IntegrationError, network — degrade to the LLM estimate quietly
+    except Exception as exc:  # The estimate remains available when the external service fails.
+        logger.warning("food database lookup failed: %s", type(exc).__name__)
         return None
     for hit in hits:
+        if " ".join(hit.name.casefold().split()) != " ".join(query.name.casefold().split()):
+            continue
         m = PER_100G_RE.search(hit.description or "")
         if not m:
             continue
         kcal, fat, carbs, protein = (float(g) for g in m.groups())
-        return _scale(query.name, query.grams, (kcal, protein, carbs, fat, 0.0), "fatsecret")
+        return _scale(query.name, query.grams, (kcal, protein, carbs, fat, None), "fatsecret")
     return None
 
 
@@ -112,11 +116,15 @@ def _estimate_batch(
         record_llm_call(db, user_id, reply.usage, tier="fast", purpose="estimate")
     out: dict[str, tuple[float, float, float, float, float]] = {}
     for food in json.loads(reply.text).get("foods", []):
-        out[str(food["name"]).strip().lower()] = (
+        values = (
             float(food["kcal_per_100g"]), float(food["protein_g_per_100g"]),
             float(food["carbs_g_per_100g"]), float(food["fat_g_per_100g"]),
             float(food["fiber_g_per_100g"]),
         )
+        if any(not math.isfinite(value) or value < 0 or value > maximum
+               for value, maximum in zip(values, (1000, 100, 100, 100, 100))):
+            raise ValueError("Nutrition estimation returned invalid values; try again.")
+        out[str(food["name"]).strip().lower()] = values
     return out
 
 
@@ -146,16 +154,12 @@ def resolve_items(
         estimates = _estimate_batch(coach, queries, db, user_id)
         unmatched: list[tuple[int, MealItemQuery]] = []
         for i, q in missing:
-            per100 = estimates.pop(q.name.strip().lower(), None)
+            per100 = estimates.get(q.name.strip().lower())
             if per100 is None:
                 unmatched.append((i, q))
             else:
                 resolved[i] = _scale(q.name, q.grams, per100, "estimate")
-        # The model occasionally renames items; map leftovers positionally to what it returned.
-        leftovers = list(estimates.values())
-        for pos, (i, q) in enumerate(unmatched):
-            if pos < len(leftovers):
-                resolved[i] = _scale(q.name, q.grams, leftovers[pos], "estimate")
+        # Never assign a different food's estimate to an unresolved item.
         unresolved = [q.name for i, q in enumerate(items) if i not in resolved]
         if unresolved:
             raise ValueError("could not estimate nutrition for: " + ", ".join(unresolved))

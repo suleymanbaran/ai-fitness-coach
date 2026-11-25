@@ -69,10 +69,10 @@ function TemplateEditor({
           return {
             ...it,
             kcal: String(Math.round(r.kcal)),
-            protein_g: String(r.protein_g),
-            carbs_g: String(r.carbs_g),
-            fat_g: String(r.fat_g),
-            fiber_g: String(r.fiber_g),
+            protein_g: r.protein_g == null ? "" : String(r.protein_g),
+            carbs_g: r.carbs_g == null ? "" : String(r.carbs_g),
+            fat_g: r.fat_g == null ? "" : String(r.fat_g),
+            fiber_g: r.fiber_g == null ? "" : String(r.fiber_g),
           };
         })
       );
@@ -169,8 +169,8 @@ function TemplateEditor({
         </Button>
       </div>
       <p className="text-xs text-ash">
-        Type only names and grams — "Compute nutrition" fills kcal and macros (database or coach
-        estimate); correct any value you think is wrong before saving.
+        Type only names and grams — "Compute nutrition" fills estimated kcal and macros;
+        correct any value you think is wrong before saving.
       </p>
       {error && <p className="text-sm text-ember">{error}</p>}
     </form>
@@ -366,14 +366,16 @@ function EditMealForm({ userId, meal, onSaved, onCancel }: {
   );
 }
 
-/* Name + grams per line; the backend resolves kcal/macros (FatSecret per-100g or one
-   batched LLM estimate). Saved meal templates load into the same rows, editable. */
+/* Name + grams per line; the backend estimates kcal/macros in one batch.
+   Saved meal templates load into the same editable rows. */
 function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; onLogged: () => void }) {
   const [meal, setMeal] = useState("breakfast");
   const [items, setItems] = useState<{ name: string; grams: string }[]>([{ name: "", grams: "100" }]);
   const [rows, setRows] = useState<ResolvedItem[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [uncertainty, setUncertainty] = useState("");
   const templates = useFetch(() => api.mealTemplates(userId), [userId]);
 
   const patch = (index: number, values: Partial<{ name: string; grams: string }>) => {
@@ -395,10 +397,10 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
           name: m ? m[2].trim() : it.description,
           grams: m ? Number(m[1].replace(",", ".")) : 100,
           kcal: it.kcal,
-          protein_g: it.protein_g ?? 0,
-          carbs_g: it.carbs_g ?? 0,
-          fat_g: it.fat_g ?? 0,
-          fiber_g: it.fiber_g ?? 0,
+          protein_g: it.protein_g ?? null,
+          carbs_g: it.carbs_g ?? null,
+          fat_g: it.fat_g ?? null,
+          fiber_g: it.fiber_g ?? null,
           source: "template" as const,
         };
       })
@@ -407,6 +409,33 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
   };
 
   const clean = items.filter((i) => i.name.trim() && Number(i.grams) > 0);
+
+  const analyze = async () => {
+    if (!photo) return;
+    if (!["image/jpeg", "image/png", "image/webp"].includes(photo.type) || photo.size > 5 * 1024 * 1024) {
+      setError("Choose a JPEG, PNG or WebP image up to 5 MB.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    setUncertainty("");
+    setRows(null);
+    try {
+      const result = await api.photoMeal(userId, photo);
+      setUncertainty(result.uncertainty);
+      if (!result.items.length) {
+        setError("No recognizable food found. Add foods manually or try another photo.");
+        return;
+      }
+      setItems(result.items.map((item) => ({ name: item.name, grams: String(item.grams) })));
+      setRows(result.items.map((item) => ({ ...item, source: "photo" })));
+      setPhoto(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Photo analysis failed");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const compute = async (): Promise<ResolvedItem[] | null> => {
     if (!clean.length) {
@@ -433,21 +462,23 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
   const patchRow = (index: number, values: Partial<ResolvedItem>) =>
     setRows((list) => (list ? list.map((r, i) => (i === index ? { ...r, ...values } : r)) : list));
 
-  const totals = (rows ?? []).reduce(
-    (acc, r) => ({
-      kcal: acc.kcal + r.kcal,
-      protein_g: acc.protein_g + r.protein_g,
-      carbs_g: acc.carbs_g + r.carbs_g,
-      fat_g: acc.fat_g + r.fat_g,
-      fiber_g: acc.fiber_g + r.fiber_g,
-    }),
-    { kcal: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: 0 }
-  );
+  const totalNutrient = (list: ResolvedItem[], key: "protein_g" | "carbs_g" | "fat_g" | "fiber_g") =>
+    list.every((r) => r[key] != null) ? list.reduce((sum, r) => sum + (r[key] ?? 0), 0) : null;
+  const totals = {
+    kcal: (rows ?? []).reduce((sum, r) => sum + r.kcal, 0),
+    protein_g: totalNutrient(rows ?? [], "protein_g"),
+    carbs_g: totalNutrient(rows ?? [], "carbs_g"),
+    fat_g: totalNutrient(rows ?? [], "fat_g"),
+    fiber_g: totalNutrient(rows ?? [], "fiber_g"),
+  };
 
   const save = async (e: FormEvent) => {
     e.preventDefault();
-    const finalRows = rows ?? (await compute());
-    if (!finalRows) return;
+    const finalRows = rows;
+    if (!finalRows) {
+      setError("Compute nutrition and review the estimates before logging.");
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -456,13 +487,14 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
         meal,
         description: finalRows.map((i) => `${i.grams} g ${i.name}`).join(", "),
         kcal: Math.round(finalRows.reduce((s, r) => s + r.kcal, 0)),
-        protein_g: finalRows.reduce((s, r) => s + r.protein_g, 0),
-        carbs_g: finalRows.reduce((s, r) => s + r.carbs_g, 0),
-        fat_g: finalRows.reduce((s, r) => s + r.fat_g, 0),
-        fiber_g: finalRows.reduce((s, r) => s + r.fiber_g, 0),
+        protein_g: totalNutrient(finalRows, "protein_g"),
+        carbs_g: totalNutrient(finalRows, "carbs_g"),
+        fat_g: totalNutrient(finalRows, "fat_g"),
+        fiber_g: totalNutrient(finalRows, "fiber_g"),
       });
       setRows(null);
       setItems([{ name: "", grams: "100" }]);
+      setUncertainty("");
       onLogged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
@@ -474,6 +506,14 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
   return (
     <Card title="Add meal">
       <form onSubmit={save} className="space-y-3">
+        <div className="space-y-2 rounded-lg border border-edge p-3">
+          <label className="block text-sm text-mist" htmlFor="food-photo">Food photo (JPEG, PNG or WebP, max 5 MB)</label>
+          <input id="food-photo" type="file" accept="image/jpeg,image/png,image/webp" disabled={busy}
+            onChange={(e) => setPhoto(e.target.files?.[0] ?? null)} className="text-sm text-mist" />
+          <Button type="button" onClick={analyze} disabled={busy || !photo}>Analyze photo</Button>
+          <p className="text-xs text-ash">Analyzing sends the image to OpenAI and incurs API charges. This app does not save it; OpenAI may retain data for abuse monitoring. Avoid personal or sensitive details. Estimates are uncertain: review and correct ingredients, portions and values before logging.</p>
+        </div>
+        {uncertainty && <p className="text-sm text-mist">{uncertainty}</p>}
         <div className="flex flex-wrap items-center gap-2">
           <Select value={meal} onChange={(e) => setMeal(e.target.value)} className="w-36">
             {["breakfast", "lunch", "dinner", "snack"].map((m) => (
@@ -565,14 +605,14 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
                     className="w-16 rounded border border-edge bg-night-2 px-1.5 py-0.5 text-right text-xs text-cloud"
                   />
                   <span className="text-[10px] text-ash">kcal</span>
-                  {(["protein_g", "carbs_g", "fat_g"] as const).map((key) => (
+                  {(["protein_g", "carbs_g", "fat_g", "fiber_g"] as const).map((key) => (
                     <span key={key} className="flex items-center gap-1">
                       <input
-                        type="number" step="0.1" min="0" title={key} value={r[key]}
-                        onChange={(e) => patchRow(i, { [key]: Number(e.target.value) })}
+                        type="number" step="0.1" min="0" title={key} value={r[key] ?? ""}
+                        onChange={(e) => patchRow(i, { [key]: e.target.value === "" ? null : Number(e.target.value) })}
                         className="w-14 rounded border border-edge bg-night-2 px-1.5 py-0.5 text-right text-xs text-cloud"
                       />
-                      <span className="text-[10px] text-ash">{key === "protein_g" ? "P" : key === "carbs_g" ? "C" : "F"}</span>
+                      <span className="text-[10px] text-ash">{key === "protein_g" ? "P" : key === "carbs_g" ? "C" : key === "fat_g" ? "F" : "Fiber"}</span>
                     </span>
                   ))}
                 </li>
@@ -580,18 +620,18 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
             </ul>
             <div className="mt-2 flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-edge pt-2 text-sm">
               <span className="font-grotesk text-lg font-bold text-lime">{Math.round(totals.kcal)} kcal</span>
-              <span className="text-mist">P {totals.protein_g.toFixed(0)} g</span>
-              <span className="text-mist">C {totals.carbs_g.toFixed(0)} g</span>
-              <span className="text-mist">F {totals.fat_g.toFixed(0)} g</span>
-              <span className="text-mist">Fiber {totals.fiber_g.toFixed(0)} g</span>
+              <span className="text-mist">P {totals.protein_g?.toFixed(0) ?? "?"} g</span>
+              <span className="text-mist">C {totals.carbs_g?.toFixed(0) ?? "?"} g</span>
+              <span className="text-mist">F {totals.fat_g?.toFixed(0) ?? "?"} g</span>
+              <span className="text-mist">Fiber {totals.fiber_g?.toFixed(0) ?? "?"} g</span>
               <span className="ml-auto text-xs text-ash">values are editable — correct anything that looks wrong</span>
             </div>
           </div>
         )}
         {error && <p className="text-sm text-ember">{error}</p>}
         <p className="text-xs text-ash">
-          Just the name and grams — calories and macros come from the food database or are estimated
-          by the coach. Edit amounts, add or remove foods, then log.
+          Changing a food or portion clears its nutrition values: compute again, review and then log.
+          Database matches and AI values are estimates, not measurements.
         </p>
       </form>
     </Card>
@@ -633,11 +673,13 @@ export default function Nutrition({ userId }: { userId: string }) {
 
   const sum = (key: "kcal" | "protein_g" | "carbs_g" | "fat_g" | "fiber_g") =>
     meals.data?.reduce((total, m) => total + (m[key] ?? 0), 0) ?? 0;
+  const dailyNutrient = (key: "protein_g" | "carbs_g" | "fat_g" | "fiber_g") =>
+    meals.data?.length && meals.data.every((m) => m[key] != null) ? sum(key) : null;
   const dayTotal = sum("kcal");
-  const dayProtein = sum("protein_g");
-  const dayCarbs = sum("carbs_g");
-  const dayFat = sum("fat_g");
-  const dayFiber = sum("fiber_g");
+  const dayProtein = dailyNutrient("protein_g");
+  const dayCarbs = dailyNutrient("carbs_g");
+  const dayFat = dailyNutrient("fat_g");
+  const dayFiber = dailyNutrient("fiber_g");
 
   const remove = async (mealId: number) => {
     await api.deleteMeal(userId, mealId);
@@ -655,19 +697,13 @@ export default function Nutrition({ userId }: { userId: string }) {
           label={day === todayISO() ? "Calories today" : `Calories ${day.slice(5)}`}
           value={dayTotal.toLocaleString()}
           unit="kcal"
-          delta={
-            target
-              ? dayTotal > target
-                ? `${(dayTotal - target).toLocaleString()} kcal over the ${target.toLocaleString()} target`
-                : `${(target - dayTotal).toLocaleString()} kcal remaining of ${target.toLocaleString()}`
-              : undefined
-          }
-          deltaGood={target ? dayTotal <= target : null}
+          delta={target ? `estimated maintenance ≈ ${target.toLocaleString()} kcal` : undefined}
+          deltaGood={null}
         />
-        <Stat label="Protein" value={dayProtein.toFixed(0)} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.protein_g ?? "—"} g` : undefined} deltaGood={null} />
-        <Stat label="Carbs" value={dayCarbs.toFixed(0)} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.carbs_g ?? "—"} g` : undefined} deltaGood={null} />
-        <Stat label="Fat" value={dayFat.toFixed(0)} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.fat_g ?? "—"} g` : undefined} deltaGood={null} />
-        <Stat label="Fiber" value={dayFiber.toFixed(0)} unit="g" delta={fiberTarget ? `target ${fiberTarget} g` : "target 25-38 g"} deltaGood={dayFiber >= (fiberTarget ?? 25)} />
+        <Stat label="Protein" value={dayProtein?.toFixed(0) ?? "—"} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.protein_g ?? "—"} g` : undefined} deltaGood={null} />
+        <Stat label="Carbs" value={dayCarbs?.toFixed(0) ?? "—"} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.carbs_g ?? "—"} g` : undefined} deltaGood={null} />
+        <Stat label="Fat" value={dayFat?.toFixed(0) ?? "—"} unit="g" delta={nutritionProgram ? `target ${nutritionProgram.payload.fat_g ?? "—"} g` : undefined} deltaGood={null} />
+        <Stat label="Fiber" value={dayFiber?.toFixed(0) ?? "—"} unit="g" delta={fiberTarget ? `target ${fiberTarget} g` : undefined} deltaGood={dayFiber == null ? null : dayFiber >= (fiberTarget ?? 25)} />
         <Stat
           label="Sodium"
           value={sodiumTarget ? `≤ ${sodiumTarget.toLocaleString()}` : "—"}
@@ -684,7 +720,7 @@ export default function Nutrition({ userId }: { userId: string }) {
             action={
               <div className="flex items-center gap-3">
                 <span className="text-sm font-semibold text-lime">
-                  {dayTotal.toLocaleString()} kcal{dayFiber > 0 && <span className="text-mist"> · {dayFiber.toFixed(0)} g fiber</span>}
+                  {dayTotal.toLocaleString()} kcal{dayFiber != null && dayFiber > 0 && <span className="text-mist"> · {dayFiber.toFixed(0)} g fiber</span>}
                 </span>
                 <div className="flex items-center gap-1">
                   <Button type="button" variant="ghost" className="px-2" onClick={() => changeDay(-1)} aria-label="Previous day">
@@ -802,7 +838,7 @@ export default function Nutrition({ userId }: { userId: string }) {
             <MessageCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-cyan" />
             {nutritionProgram
               ? "Targets come from your Telegram plan — numbers only, no menus. Ask the coach \"ne yemeliyim?\" when you want meal ideas."
-              : "No active plan yet. Ask the coach on Telegram (\"make me a weekly plan\") and your daily kcal/macro/fiber/salt targets appear up top."}
+              : "No active plan yet. Use the Plan page to review an energy estimate and create one."}
           </p>
         </div>
       </div>

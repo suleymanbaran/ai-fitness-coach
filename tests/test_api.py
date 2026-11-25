@@ -55,7 +55,7 @@ def test_prompt_splits_stable_prefix_from_volatile_context(fakes):
         "get_today_session", "log_workout", "log_run", "exercise_history", "strength_summary",
         "adjust_session", "revise_program", "create_weekly_plan",
     }
-    assert {"type": "web_search"} in call.kwargs["tools"]
+    assert {"type": "web_search"} not in call.kwargs["tools"]
 
 
 def test_category_filter_restricts_sources(fakes):

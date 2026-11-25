@@ -7,6 +7,7 @@ so the route can answer 502 instead of storing a broken plan.
 
 import json
 import logging
+import math
 import re
 from datetime import UTC, date, datetime, timedelta
 
@@ -17,12 +18,13 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.data_access.food import intake_window
-from app.data_access.memory import list_prefix_memories, record_llm_call
+from app.data_access.memory import list_memories, list_prefix_memories, record_llm_call
 from app.data_access.users import UserProfile, get_user_days
 from app.db.models import Program, SessionAdjustment, WorkoutLog
 from app.programs.schemas import (
     ExerciseHistoryRow,
     ExerciseSetOut,
+    EnergyInputs,
     NutritionPlanOutput,
     ProgramKind,
     StrengthOut,
@@ -42,20 +44,89 @@ PLAN_SYSTEM = """You design safe, evidence-informed training and nutrition progr
 
 Rules:
 - Ground every choice in the protocols provided and in the user's metrics, profile and memories.
+- Follow the user's brief, explicitly distinguish unknowns from known facts, and never invent
+  injuries, activity, body measurements or dietary restrictions. State assumptions in rationale.
+- Training plans must provide actionable sessions and progression; nutrition plans must include
+  concrete meals and portions when the user asks for them.
+- Do not guess missing sex, activity, expenditure or medical history. For minors, pregnancy,
+  eating disorders or relevant medical conditions, avoid restrictive targets and recommend
+  qualified professional guidance.
+- Treat the server-provided energy number as estimated maintenance only. Do not prescribe or
+  describe a calorie deficit or surplus. Protein/carbs/fat energy (4/4/9 kcal per gram) should
+  approximate that maintenance number. Do not cite other total calorie targets in text.
 - Respect every constraint in <memories>: injuries, disliked exercises or foods, equipment, schedule.
 - Follow the recovery and deload protocols; never prescribe more than the user's current metrics support.
 - Fill every field of the output schema. Use empty strings only where the schema documents them.
 - `summary` must stand alone in at most 500 characters: it is shown to the daily coach in every
   later conversation, so it carries the weekly structure and the key targets.
-- Nutrition output is NUMBERS ONLY: daily kcal, protein, carbs, fat, fiber and a sodium cap.
-  The user decides what to eat — leave `meals` empty unless they explicitly asked for meal
-  ideas, and keep `guidelines` to timing/hydration/adjustment notes, never menus or recipes.
+- Leave `meals` empty unless the user asks for meal ideas; otherwise honor their requested format.
 - If the user's message or metrics contain medical red flags, produce a conservative plan and
   state in `rationale` that they should see a doctor before starting."""
 
 
 class ProgramGenerationError(Exception):
     """The model failed to produce a schema-valid program after one retry."""
+
+
+class ProgramInputError(Exception):
+    """A numeric nutrition plan needs more information or professional care."""
+
+
+def require_nutrition_profile(user: UserProfile) -> None:
+    if user.age is None:
+        raise ProgramInputError("Please provide your age before creating a nutrition plan.")
+    if user.age < 18:
+        raise ProgramInputError("For users under 18, consult a qualified health professional for nutrition plans.")
+    missing = [label for value, label in ((user.weight_kg, "weight"), (user.height_cm, "height")) if value is None]
+    if missing:
+        raise ProgramInputError("Please provide your " + " and ".join(missing) + " before creating a nutrition plan.")
+
+
+def calculate_energy(user: UserProfile, inputs: EnergyInputs | None) -> dict:
+    """Estimate adult maintenance, not a medical prescription or weight-change target."""
+    require_nutrition_profile(user)
+    if inputs is None:
+        raise ProgramInputError(
+            "A nutrition plan needs your equation choice, activity level and safety confirmation. "
+            "Complete the energy estimate form on the web Plan page."
+        )
+    weight, height, age = user.weight_kg, user.height_cm, user.age
+    assert weight is not None and height is not None and age is not None
+    if not (math.isfinite(weight) and math.isfinite(height) and 20 < weight < 400 and 80 < height < 250 and age <= 110):
+        raise ProgramInputError("Profile measurements are invalid; update them before calculating energy.")
+    if inputs.safety_confirmed is not True:
+        raise ProgramInputError("Confirm the safety conditions before calculating energy.")
+    if weight / (height / 100) ** 2 < 18.5:
+        raise ProgramInputError("For low body weight, consult a qualified health professional before setting a target.")
+    factor = {"sedentary": 1.2, "light": 1.375, "moderate": 1.55, "very_active": 1.725}[inputs.activity]
+    resting = 10 * weight + 6.25 * height - 5 * age + (5 if inputs.equation == "male" else -161)
+    target = round(resting * factor)
+    if not 800 <= target <= 8000:
+        raise ProgramInputError("The estimated energy value is outside the supported range; consult a professional.")
+    return {
+        "method": "mifflin_st_jeor_maintenance",
+        "equation": inputs.equation,
+        "activity": inputs.activity,
+        "activity_factor": factor,
+        "age": age,
+        "weight_kg": weight,
+        "height_cm": height,
+        "resting_kcal": round(resting),
+        "target_kcal": target,
+    }
+
+
+def check_nutrition_safety(brief: str | None, memories) -> None:
+    text = " ".join([brief or "", *(f"{m.key} {m.value}" for m in memories)])
+    if re.search(
+        r"hamile|gebey|gebelik|emzir|yeme bozuk|anoreksi|bulimi|diyabet|böbrek|"
+        r"pregnan|breastfeed|eating disorder|anorexi|bulimi|diabet|kidney",
+        text, re.IGNORECASE,
+    ):
+        raise ProgramInputError(
+            "The request or saved context mentions a condition needing individualized care; "
+            "consult a qualified professional. Correct any inaccurate saved information."
+        )
 
 
 def _strict_schema(schema: dict) -> dict:
@@ -98,6 +169,7 @@ def _validated_plan_call(
     stable: str,
     volatile: str,
     purpose: str = "plan",
+    energy_target: int | None = None,
 ):
     """Plan-tier structured call with exactly one retry that feeds the validation error back."""
     schema = _strict_schema(output_model.model_json_schema())
@@ -112,8 +184,31 @@ def _validated_plan_call(
         )
         record_llm_call(db, user.user_id, reply.usage, tier="plan", purpose=purpose)
         try:
-            return output_model.model_validate(json.loads(reply.text))
-        except (json.JSONDecodeError, ValidationError) as exc:
+            parsed = output_model.model_validate(json.loads(reply.text))
+            if energy_target is not None:
+                nutrition = parsed.nutrition if isinstance(parsed, WeeklyPlanOutput) else parsed.plan
+                if nutrition.target_kcal != energy_target:
+                    raise ValueError(f"target_kcal must equal the calculated maintenance estimate {energy_target}")
+                macro_kcal = 4 * (nutrition.protein_g + nutrition.carbs_g) + 9 * nutrition.fat_g
+                if abs(macro_kcal - energy_target) > energy_target * 0.15:
+                    raise ValueError("Protein, carbohydrate and fat must approximately match the maintenance estimate")
+                text = " ".join(
+                    [parsed.rationale, *nutrition.guidelines]
+                    + ([parsed.nutrition_name, parsed.nutrition_summary, parsed.training_name, parsed.training_summary]
+                       if isinstance(parsed, WeeklyPlanOutput)
+                       else [parsed.name, parsed.summary])
+                )
+                amounts = re.findall(r"(?<![\d.,])(\d{1,2}[.,]\d{3}|\d{3,5})\s*(?:kcal|calories|kalori)\b", text, re.IGNORECASE)
+                amounts += re.findall(
+                    r"(?:target|hedef(?:i|iniz)?|daily|günlük)\D{0,15}(\d{1,2}[.,]\d{3}|\d{4,5})\b",
+                    text, re.IGNORECASE,
+                )
+                if any(int(amount.replace(",", "").replace(".", "")) != energy_target for amount in amounts):
+                    raise ValueError("Nutrition summary, rationale and guidelines must not introduce another calorie target")
+                if re.search(r"\b(?:deficit|surplus)\b|kalori açığı|kalorik açık|kalori fazlası", text, re.IGNORECASE):
+                    raise ValueError("Use the maintenance estimate only; do not prescribe a deficit or surplus")
+            return parsed
+        except (json.JSONDecodeError, ValidationError, ValueError) as exc:
             last_error = str(exc)[:800]
             logger.warning("%s attempt %d failed validation", schema_name, attempt + 1)
     raise ProgramGenerationError(last_error)
@@ -142,9 +237,13 @@ def generate_program(
     kind: ProgramKind,
     brief: str | None,
     settings: Settings,
+    energy: EnergyInputs | None = None,
 ) -> Program:
+    calculation = calculate_energy(user, energy) if kind == "nutrition" else None
     output_model = TrainingPlanOutput if kind == "training" else NutritionPlanOutput
     memories = list_prefix_memories(db, user.user_id, settings.memory_max_entries)
+    if calculation:
+        check_nutrition_safety(brief, list_memories(db, user.user_id))
     chunks = _retrieve_program_protocols(embedder, store, kind, user, brief)
 
     stable = "\n\n".join([PLAN_SYSTEM, format_profile(user), format_memories(memories)])
@@ -159,22 +258,29 @@ def generate_program(
     task = f"Task: design a {kind} program" + (f". User brief: {brief}" if brief else "") + "."
     if kind == "nutrition":
         task += (
-            " Provide ONLY numeric targets (kcal, protein, carbs, fat, fiber, sodium cap);"
-            " leave `meals` empty unless the brief explicitly asks for meal ideas."
+            f" The server-calculated estimated MAINTENANCE is {calculation['target_kcal']} kcal/day;"
+            f" the user's explicit activity choice is {calculation['activity']} (factor {calculation['activity_factor']})."
+            " use exactly this as target_kcal. It is an estimate, not a deficit or medical prescription."
+            " Do not invent a different calorie target. Include meals if requested."
         )
     volatile_blocks += [format_chunks(chunks), task]
 
     parsed = _validated_plan_call(
-        db, coach, user, output_model, f"{kind}_program", stable, "\n\n".join(volatile_blocks)
+        db, coach, user, output_model, f"{kind}_program", stable, "\n\n".join(volatile_blocks),
+        energy_target=calculation["target_kcal"] if calculation else None,
     )
+    payload = parsed.plan.model_dump()
+    if calculation:
+        payload["energy_calculation"] = calculation
     program = Program(
         user_id=user.user_id,
         kind=kind,
         status="draft",
         version=_next_version(db, user.user_id, kind),
-        name=parsed.name[:120],
-        summary=parsed.summary[:500],
-        payload=parsed.plan.model_dump(),
+        name="Nutrition — estimated maintenance" if calculation else parsed.name[:120],
+        summary=(f"Estimated maintenance: {calculation['target_kcal']} kcal/day. "
+                 "This is not a weight-loss prescription.") if calculation else parsed.summary[:500],
+        payload=payload,
         rationale=parsed.rationale,
     )
     db.add(program)
@@ -193,12 +299,11 @@ Requirements:
   sessions with modality, duration and intensity in the cardio field (zone 2 for recovery/fat loss,
   intervals only when recovery supports it).
 - nutrition must match the training load and the user's goal: a single daily kcal target plus
-  protein/carbs/fat/fiber grams and a sodium cap in mg. Do NOT prescribe meals or foods — the
-  user only wants the numbers; leave `meals` empty unless the brief explicitly asks for meal
-  ideas. On cardio-heavy days, note how carbs should shift in the guidelines.
+  protein/carbs/fat/fiber grams and a sodium cap in mg. Include meals and portions when the brief
+  requests them; otherwise leave `meals` empty. Note uncertain assumptions and adjustments.
 - The two summaries must stand alone: each is shown to the daily coach in later conversations.
-- Respect <memories> (schedule, equipment, injuries, food rules) and the metrics; a surplus or
-  poor-recovery day never means dropping the plan, it means adjusting cardio/loads within it."""
+- Respect <memories> (schedule, equipment, injuries, food rules) and the metrics; poor recovery
+  can require rest. Do not prescribe compensatory exercise for a high-calorie day."""
 
 
 def generate_weekly_plan(
@@ -209,9 +314,12 @@ def generate_weekly_plan(
     user: UserProfile,
     brief: str | None,
     settings: Settings,
+    energy: EnergyInputs | None = None,
 ) -> tuple[Program, Program]:
     """Generate training+cardio+nutrition as one coherent plan; both halves activate immediately."""
+    calculation = calculate_energy(user, energy)
     memories = list_prefix_memories(db, user.user_id, settings.memory_max_entries)
+    check_nutrition_safety(brief, list_memories(db, user.user_id))
     training_chunks = _retrieve_program_protocols(embedder, store, "training", user, brief)
     nutrition_chunks = _retrieve_program_protocols(embedder, store, "nutrition", user, brief)
     seen = {c.protocol_id for c in training_chunks}
@@ -229,10 +337,17 @@ def generate_weekly_plan(
         volatile_blocks.append(
             "Recent training: " + ", ".join(f"{w.date} {w.session_name}" for w in workouts)
         )
-    volatile_blocks += [format_chunks(chunks), WEEKLY_TASK + (f"\nUser brief: {brief}" if brief else "")]
+    volatile_blocks += [
+        format_chunks(chunks),
+        WEEKLY_TASK + (f"\nUser brief: {brief}" if brief else "")
+        + f"\nThe server-calculated estimated MAINTENANCE is {calculation['target_kcal']} kcal/day. "
+        + f"The user's activity choice is {calculation['activity']} (factor {calculation['activity_factor']}). "
+        "Use exactly this as nutrition.target_kcal; do not invent another calorie target or deficit.",
+    ]
 
     parsed = _validated_plan_call(
-        db, coach, user, WeeklyPlanOutput, "weekly_plan", stable, "\n\n".join(volatile_blocks)
+        db, coach, user, WeeklyPlanOutput, "weekly_plan", stable, "\n\n".join(volatile_blocks),
+        energy_target=calculation["target_kcal"],
     )
     training = Program(
         user_id=user.user_id, kind="training", status="draft",
@@ -243,8 +358,9 @@ def generate_weekly_plan(
     nutrition = Program(
         user_id=user.user_id, kind="nutrition", status="draft",
         version=_next_version(db, user.user_id, "nutrition"),
-        name=parsed.nutrition_name[:120], summary=parsed.nutrition_summary[:500],
-        payload=parsed.nutrition.model_dump(), rationale=parsed.rationale,
+        name="Nutrition — estimated maintenance",
+        summary=f"Estimated maintenance: {calculation['target_kcal']} kcal/day. This is not a weight-loss prescription.",
+        payload={**parsed.nutrition.model_dump(), "energy_calculation": calculation}, rationale=parsed.rationale,
     )
     db.add(training)
     db.add(nutrition)
@@ -264,11 +380,15 @@ def revise_program(
     program: Program,
     feedback: str,
     settings: Settings,
+    energy: EnergyInputs | None = None,
 ) -> Program:
     """Apply the user's adherence feedback: produces version N+1 and activates it.
     History is kept — old versions stay archived."""
+    calculation = calculate_energy(user, energy) if program.kind == "nutrition" else None
     output_model = TrainingPlanOutput if program.kind == "training" else NutritionPlanOutput
     memories = list_prefix_memories(db, user.user_id, settings.memory_max_entries)
+    if calculation:
+        check_nutrition_safety(feedback, list_memories(db, user.user_id))
     chunks = _retrieve_program_protocols(embedder, store, program.kind, user, feedback)
 
     stable = "\n\n".join([PLAN_SYSTEM, format_profile(user), format_memories(memories)])
@@ -281,15 +401,27 @@ def revise_program(
         "Revise the plan so the feedback is accommodated while keeping everything that already works. "
         "Change only what the feedback requires; return the FULL updated plan with an updated summary.",
     ])
+    if calculation:
+        volatile += (
+            f"\nThe server-calculated estimated MAINTENANCE is {calculation['target_kcal']} kcal/day. "
+            f"The user's activity choice is {calculation['activity']} (factor {calculation['activity_factor']}). "
+            "Use exactly this as target_kcal; do not reuse an old target or invent a deficit."
+        )
 
     parsed = _validated_plan_call(
-        db, coach, user, output_model, f"{program.kind}_program", stable, volatile, purpose="review"
+        db, coach, user, output_model, f"{program.kind}_program", stable, volatile, purpose="review",
+        energy_target=calculation["target_kcal"] if calculation else None,
     )
+    payload = parsed.plan.model_dump()
+    if calculation:
+        payload["energy_calculation"] = calculation
     revised = Program(
         user_id=user.user_id, kind=program.kind, status="draft",
         version=_next_version(db, user.user_id, program.kind),
-        name=parsed.name[:120], summary=parsed.summary[:500],
-        payload=parsed.plan.model_dump(), rationale=parsed.rationale,
+        name="Nutrition — estimated maintenance" if calculation else parsed.name[:120],
+        summary=(f"Estimated maintenance: {calculation['target_kcal']} kcal/day. "
+                 "This is not a weight-loss prescription.") if calculation else parsed.summary[:500],
+        payload=payload, rationale=parsed.rationale,
     )
     db.add(revised)
     db.flush()
@@ -321,7 +453,12 @@ def active_programs_summary(db: Session, user_id: str) -> str:
     programs = db.scalars(
         select(Program).where(Program.user_id == user_id, Program.status == "active").order_by(Program.kind)
     )
-    return "\n\n".join(f"{p.kind.capitalize()} program v{p.version} — {p.name}: {p.summary}" for p in programs)
+    return "\n\n".join(
+        "Nutrition program: older energy target unverified; do not use it as a calorie target."
+        if p.kind == "nutrition" and not p.payload.get("energy_calculation")
+        else f"{p.kind.capitalize()} program v{p.version} — {p.name}: {p.summary}"
+        for p in programs
+    )
 
 
 def activate_program(db: Session, user_id: str, program_id: int) -> Program | None:

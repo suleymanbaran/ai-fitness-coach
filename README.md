@@ -44,24 +44,32 @@ Anyone can ask the coach questions and log days without connecting Google Health
 - **Acts, not just answers:** during a chat the coach calls tools to log metrics, search the
   FatSecret food database, log meals (writing through to your real FatSecret diary when connected)
   and log completed workouts. When FatSecret's US-only free database misses a food (simit, döner,
-  local Italian dishes), the coach falls back to OpenAI's built-in **web search** ($10/1k calls),
-  and only then to its own estimate — always telling you which source the number came from.
+  local Italian dishes), the coach can use OpenAI's built-in **web search** ($10/1k calls) if
+  `ENABLE_WEB_SEARCH=true`; otherwise it may use an explicitly labeled estimate.
 - **Templates for the things you repeat:** save your usual breakfast as a *meal template* ("oats
   breakfast") and log it with one sentence or one click, optionally scaled ("1.5 servings").
   *Workout templates* (starter Push/Pull/Legs or your own) prefill the log form — with the weights
   from your last session, so progressive overload is one edit away. Fiber is tracked per meal,
   per template and per day alongside protein/carbs/fat. The web **Add meal** form only asks for
-  food **names + grams** — kcal/macros are resolved automatically (`POST /users/{id}/meals/compute`:
-  FatSecret per-100g hit first, otherwise one batched LLM estimate), and saved templates load into
-  the same editable rows.
-- **Programs, planned on Telegram:** the weekly plan (7 days of training incl. cardio + numeric
-  nutrition targets) is created **from chat** — send `/plan` or just ask ("make me a weekly plan");
-  the `create_weekly_plan` tool designs and activates both halves on the plan-tier model with
-  schema-validated structured output, and they appear on the web Plan page and Calendar
-  automatically. Nutrition plans are **numbers only** (kcal, protein, carbs, fat, fiber, sodium
-  cap) — no menus unless you explicitly ask what to eat. Report adherence problems ("Fridays no
-  longer work") in chat and the coach **revises and re-activates** the plan as a new version; old
-  versions stay in history. Strength tracking: per-set weight/reps/RPE/**RIR**, Epley e1RM, weekly
+  food **names + grams** — kcal/macros are resolved in one batched LLM estimate
+  (`POST /users/{id}/meals/compute`), and saved templates
+  load into the same editable rows. Missing nutrients remain unknown rather than zero.
+- **Food photo estimates (React Nutrition page):** choose a JPEG, PNG or WebP (up to 5 MiB and
+  20 million pixels) and explicitly select **Analyze photo**. Review the estimated foods, grams,
+  calories and macros before **Log meal**; changing a food or portion requires recomputing and
+  reviewing nutrition. Estimates can miss oil, sauces or ingredients and do not measure weight.
+  The photo path uses the vision model's own estimates, not an automatic FatSecret match.
+  Edited photo items are recomputed by the LLM too. FatSecret search values are not automatically
+  copied into these persistent logs: its [storable-data policy](https://platform.fatsecret.com/docs/guides/storable-data)
+  limits storage of non-ID data. Existing FatSecret diary synchronization and chat integration
+  predate this change and need a separate terms/retention review before production use.
+- **Programs:** discuss constraints with the coach, then use the React Plan page to explicitly
+  select energy inputs, preview the maintenance estimate and create a weekly plan. The plan-tier
+  model generates training and nutrition suggestions, but cannot select the calorie target.
+  Both halves appear on the Plan page and Calendar. Nutrition revisions require fresh energy
+  inputs; training changes can be requested in chat. Older model-generated calorie targets are
+  marked unverified and hidden. Report adherence problems ("Fridays no longer work") and revise;
+  old versions stay in history. Strength tracking: per-set weight/reps/RPE/**RIR**, Epley e1RM, weekly
   volume load, PRs — all queryable by the LLM (`strength_summary`) and charted in the dashboard.
 - **Cardio capacity:** runs arrive three ways — automatically from Fitbit **exercise sessions** on
   every sync (running-family types at run pace; idempotent via the Google Health dataPoint name),
@@ -198,9 +206,9 @@ python -m scripts.telegram_bot      # terminal 3 (optional): the Telegram bot, s
 The dashboard (`web/`, Vite + React + Tailwind + Recharts, one-time `npm install`) is the main
 tracking UI — dark theme with lime→cyan gradients (Archivo body, Space Grotesk numerals): Today
 (gradient calorie ring, sleep stages, steps/burn), Trends (weight/HRV/sleep/intake charts), Plan
-(weekly grid, revise box, version history — generation happens on Telegram), **Calendar** (month
-view: planned day type vs. logged workouts/runs, kcal-vs-target colors and per-day step counts; clicking a day opens
-its detail: planned session/focus/cardio, steps vs goal, taken-vs-target kcal/macros/fiber/sodium),
+(weekly grid, estimate form, revise box, version history), **Calendar** (month
+view: planned day type vs. logged workouts/runs, intake and per-day step counts; clicking a day opens
+its detail: planned session/focus/cardio, steps vs goal and nutrition),
 Nutrition (name+grams meal logging with auto-computed **and editable** macros, templates, numeric
 targets only), Workouts
 (per-exercise **weight progression**: top weight, e1RM, volume, set-by-set history), **Cardio**
@@ -238,8 +246,8 @@ Everything else happens in plain conversation, on the web or on Telegram — the
 - "Remember that I only have dumbbells at home" → stores a durable memory shown on the **Memory** page.
 - "I did bench 5x5 at 80kg" → writes a `workout_logs` entry.
 
-Training and nutrition programs are generated on the **Training** / **Nutrition** pages (or with
-`/plan` on Telegram), reviewed against your adherence there, and the active program's summary is part
+Training programs can be generated from chat; nutrition and weekly plans require the React
+**Plan** page. The active program's summary is part
 of the coach's cached context in every later conversation.
 
 The same over HTTP:
@@ -312,7 +320,7 @@ the OAuth 1.0 **Consumer Key** and **Consumer Secret** into `.env` as `FATSECRET
 edition table — diary reads/writes and food search are *not* Premier-only):
 
 - 5,000 API calls/day, **US food database, English only**. Foods from other countries often aren't
-  found by search; the coach then falls back to web search or estimates calories from general
+  found by search; the coach may use enabled web search or estimate calories from general
   knowledge and logs them with `source="assistant"` (the diary sync still reports what you logged
   in the FatSecret app itself, which has the full local database).
 - Food **search and nutrition lookup work with the consumer key alone** — you do not need to
@@ -358,9 +366,9 @@ Then run `python -m scripts.telegram_bot` (locally) or enable the `bot` service 
 restarts on crashes: put a plist with `RunAtLoad`/`KeepAlive` running the command above (working
 directory = repo root) in `~/Library/LaunchAgents/` and `launchctl bootstrap gui/$UID <plist>`.
 Plain text goes to the coach (including logging via its tools); commands:
-`/today`, `/meals`, `/workout`, `/plan` (no args: unified weekly plan — training+cardio+nutrition;
-`/plan training|nutrition [brief]` for one), `/review [regenerate]`,
+`/today`, `/meals`, `/workout`, `/plan training [brief]`, `/review [regenerate]`,
 `/sync`, `/memory`, `/forget <kind> <key>`, `/start`.
+Nutrition and weekly plan generation requires the energy form in the React Plan page.
 
 ## Models and costs
 
@@ -377,7 +385,42 @@ the active program summary — carries an explicit breakpoint with a 12h TTL (wr
 1,024 tokens before a breakpoint pays off, so short prefixes skip it. Every call is recorded in
 `llm_calls` (model, purpose, input/cached/output tokens); the **Cost** page turns that into estimated
 spend and cache-hit rate. At personal volume (dozens of questions a day) expect roughly
-**$0.50-1.50/month**. Swap models via `FAST_MODEL` / `PLAN_MODEL` in `.env`.
+**$0.50-1.50/month** for the original workload; photos and web search add cost. Swap models via
+`FAST_MODEL` / `PLAN_MODEL` in `.env`; a replacement fast model must support image input, Responses
+API and structured outputs. `ENABLE_WEB_SEARCH` defaults to false. These are estimates, not caps.
+
+Photo analysis uses `FAST_MODEL` (`gpt-6-luna` by default), low-detail image input and up to 2,500
+output tokens. As of 2026-11-25, OpenAI lists Luna at $0.10/M input and $0.50/M output text tokens;
+image tokens are billed too, so actual cost depends on image and response size. See the official
+[model](https://developers.openai.com/api/docs/models/gpt-6-luna),
+[vision](https://developers.openai.com/api/docs/guides/images-vision) and
+[pricing](https://developers.openai.com/api/docs/pricing) pages. Account access and rates can
+change. `PHOTO_RATE_LIMIT_PER_MINUTE` defaults to 5 per user per process; it is not a distributed
+quota or spending cap. Photo analysis is unavailable in demo mode.
+
+The app validates and resizes photos, strips metadata, does not persist the image, and requests
+`store=false` from OpenAI. Clicking Analyze sends the image to OpenAI; its
+[data policy](https://developers.openai.com/api/docs/guides/your-data) describes abuse-monitoring
+retention (up to 30 days by default, with exceptions). Do not upload sensitive images. Only token
+usage is recorded by this feature; confirmed meal values are saved separately.
+
+Coaching context contains the profile, saved memories, recent logs and the last
+`CHAT_HISTORY_TURNS` **messages** across web and Telegram (default 8), not unlimited history.
+Adult protein reference ranges in the prompt are computed from recorded weight. The energy form
+requires explicit equation and activity selections and a safety confirmation, plus current age,
+height and weight in the profile. The server calculates estimated **maintenance** with
+Mifflin–St Jeor: `10 × kg + 6.25 × cm − 5 × age + coefficient` (female −161 or male +5),
+multiplied by 1.2, 1.375, 1.55 or 1.725 for the selected activity level. No automatic deficit or
+surplus is applied. The model's plan is rejected if its kcal value or macro energy conflicts with
+the server calculation. The equation and activity factor are approximate, can be inaccurate for
+an individual, and are not a medical prescription; see the
+[systematic review](https://pubmed.ncbi.nlm.nih.gov/15883556/). No estimate is offered to minors,
+people with underweight BMI, or without safety confirmation. Pregnancy, breastfeeding, eating
+disorders and other conditions requiring individualized care need a qualified professional. The
+form's equation choices do not cover every individual; consult a professional if unsure.
+Inputs and the resulting calculation are saved in the nutrition plan payload, not the image.
+Chat remains generative and cannot guarantee clinical accuracy; use the form rather than chat
+arithmetic for energy estimates.
 
 Note: Gemini's free tier was evaluated and rejected for this use case — its free tier trains on your
 content (health data) and gates context caching behind the paid tier.

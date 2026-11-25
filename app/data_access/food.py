@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 
 from pydantic import BaseModel
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.data_access.biometrics import upsert_daily_metrics
@@ -85,14 +85,18 @@ def delete_food_log(db: Session, user_id: str, log_id: int) -> date | None:
     return day
 
 
+def _complete_sum(column):
+    return case((func.count(column) == func.count(), func.sum(column)), else_=None)
+
+
 def day_intake(db: Session, user_id: str, day: date) -> DayIntake:
     totals = db.execute(
         select(
             func.coalesce(func.sum(FoodLog.kcal), 0),
-            func.sum(FoodLog.protein_g),
-            func.sum(FoodLog.carbs_g),
-            func.sum(FoodLog.fat_g),
-            func.sum(FoodLog.fiber_g),
+            _complete_sum(FoodLog.protein_g),
+            _complete_sum(FoodLog.carbs_g),
+            _complete_sum(FoodLog.fat_g),
+            _complete_sum(FoodLog.fiber_g),
             func.count(),
         ).where(FoodLog.user_id == user_id, FoodLog.date == day)
     ).one()
@@ -135,10 +139,10 @@ def intake_window(db: Session, user_id: str, days: int = 14) -> list[DayIntake]:
         select(
             FoodLog.date,
             func.sum(FoodLog.kcal),
-            func.sum(FoodLog.protein_g),
-            func.sum(FoodLog.carbs_g),
-            func.sum(FoodLog.fat_g),
-            func.sum(FoodLog.fiber_g),
+            _complete_sum(FoodLog.protein_g),
+            _complete_sum(FoodLog.carbs_g),
+            _complete_sum(FoodLog.fat_g),
+            _complete_sum(FoodLog.fiber_g),
             func.count(),
         )
         .where(FoodLog.user_id == user_id, FoodLog.date >= start, FoodLog.date <= end)
