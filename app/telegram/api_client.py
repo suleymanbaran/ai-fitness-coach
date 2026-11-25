@@ -65,6 +65,14 @@ class CoachAPI:
         params = {"day": day.isoformat()} if day else {}
         return self._request("GET", f"/users/{user_id}/meals", params=params)
 
+    def photo_estimate(self, user_id: str, image: bytes, content_type: str = "image/jpeg") -> dict:
+        return self._request(
+            "POST", f"/users/{user_id}/meals/photo", content=image, headers={"Content-Type": content_type}
+        )
+
+    def log_meal(self, user_id: str, **meal) -> dict:
+        return self._request("POST", f"/users/{user_id}/meals", json=meal)
+
     def memories(self, user_id: str) -> list[dict]:
         return self._request("GET", f"/users/{user_id}/memories")
 
