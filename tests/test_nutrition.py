@@ -254,6 +254,42 @@ def test_coach_tools_log_future_meals_and_templates(monkeypatch):
     assert handlers["log_meal"]({"date": "invalid", "meal": "lunch", "description": "Rice", "kcal": 300}).startswith("error:")
 
 
+def test_template_nutrients_are_scaled_only_when_complete_in_api_and_coach(monkeypatch):
+    template = SimpleNamespace(
+        name="Meal", meal="lunch", items=[
+            {"description": "First", "kcal": 201, "servings": 0.5, "protein_g": 20, "carbs_g": 0},
+            {"description": "Second", "kcal": 100, "servings": 2, "protein_g": 5, "fat_g": 3},
+        ],
+    )
+    entries = []
+
+    def add(_db, _user, day, **values):
+        row = SimpleNamespace(
+            id=1, date=day, fatsecret_food_id=None, fatsecret_entry_id=None, servings=1, **values,
+        )
+        entries.append(row)
+        return row
+
+    db = SimpleNamespace(get=lambda *_: object(), commit=lambda: None)
+    for module in ("app.main", "app.rag.tools"):
+        monkeypatch.setattr(f"{module}.find_meal_template", lambda *_: template)
+        monkeypatch.setattr(f"{module}.add_food_log", add)
+        monkeypatch.setattr(f"{module}.sync_day_calories", lambda *_: 600)
+    monkeypatch.setattr("app.main.authorize", lambda *_: None)
+    result = log_from_meal_template(
+        "Meal", LogFromTemplateIn(factor=2), user_id="u1", db=db, current=None,
+    )
+    _, handlers = build_ask_tools(db, "u1", Settings(_env_file=None))
+    handlers["use_meal_template"]({"name": "Meal", "factor": 2})
+
+    for row in (result, entries[-1]):
+        assert row.kcal == 601
+        assert row.protein_g == 40
+        assert row.carbs_g is None
+        assert row.fat_g is None
+        assert row.fiber_g is None
+
+
 def test_coach_prompt_includes_current_date_without_metrics():
     user = UserProfile(user_id="u1", name="Test", goal="general_fitness", days=[])
     prompt = build_prompt("Yarın için öğle yemeği kaydet", user, [], [])

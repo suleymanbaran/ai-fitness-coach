@@ -14,6 +14,24 @@ const TOOLTIP = {
 const EMPTY_ITEM = { name: "", grams: "100", kcal: "", protein_g: "", carbs_g: "", fat_g: "", fiber_g: "" };
 type ItemForm = typeof EMPTY_ITEM;
 
+const GRAMS_RE = /^\s*([\d.,]+)\s*(?:g|gr|gram)\b\.?\s+(.+)$/i;
+
+function scaledTemplateItem(item: MealTemplateItem): ResolvedItem {
+  const match = item.description.match(GRAMS_RE);
+  const scale = (value: number) => Number((value * item.servings).toPrecision(12));
+  const nutrient = (value: number | null | undefined) => value == null ? null : scale(value);
+  return {
+    name: match ? match[2].trim() : item.description,
+    grams: scale(match ? Number(match[1].replace(",", ".")) : 100),
+    kcal: scale(item.kcal),
+    protein_g: nutrient(item.protein_g),
+    carbs_g: nutrient(item.carbs_g),
+    fat_g: nutrient(item.fat_g),
+    fiber_g: nutrient(item.fiber_g),
+    source: "template",
+  };
+}
+
 function TemplateEditor({
   userId,
   existing,
@@ -28,15 +46,15 @@ function TemplateEditor({
   const [items, setItems] = useState<ItemForm[]>(
     existing
       ? existing.items.map((i) => {
-          const m = i.description.match(GRAMS_RE);
+          const item = scaledTemplateItem(i);
           return {
-            name: m ? m[2].trim() : i.description,
-            grams: m ? m[1].replace(",", ".") : String(100 * i.servings),
-            kcal: String(Math.round(i.kcal * i.servings)),
-            protein_g: i.protein_g != null ? String(i.protein_g) : "",
-            carbs_g: i.carbs_g != null ? String(i.carbs_g) : "",
-            fat_g: i.fat_g != null ? String(i.fat_g) : "",
-            fiber_g: i.fiber_g != null ? String(i.fiber_g) : "",
+            name: item.name,
+            grams: String(item.grams),
+            kcal: String(Math.round(item.kcal)),
+            protein_g: item.protein_g == null ? "" : String(item.protein_g),
+            carbs_g: item.carbs_g == null ? "" : String(item.carbs_g),
+            fat_g: item.fat_g == null ? "" : String(item.fat_g),
+            fiber_g: item.fiber_g == null ? "" : String(item.fiber_g),
           };
         })
       : [{ ...EMPTY_ITEM }]
@@ -138,12 +156,12 @@ function TemplateEditor({
             value={item.name}
             onChange={(e) => set(index, { name: e.target.value })}
           />
-          <Input className="sm:col-span-1" type="number" min={1} max={2000} title="Grams" value={item.grams} onChange={(e) => set(index, { grams: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" step="any" min={1} max={2000} title="Grams" value={item.grams} onChange={(e) => set(index, { grams: e.target.value })} />
           <Input className="sm:col-span-2" type="number" min={0} placeholder="kcal" title="kcal — computed or typed" value={item.kcal} onChange={(e) => set(index, { kcal: e.target.value })} />
-          <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="P" value={item.protein_g} onChange={(e) => set(index, { protein_g: e.target.value })} />
-          <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="C" value={item.carbs_g} onChange={(e) => set(index, { carbs_g: e.target.value })} />
-          <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="F" value={item.fat_g} onChange={(e) => set(index, { fat_g: e.target.value })} />
-          <Input className="sm:col-span-1" type="number" step="0.1" min={0} placeholder="Fiber" value={item.fiber_g} onChange={(e) => set(index, { fiber_g: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" step="any" min={0} placeholder="P" value={item.protein_g} onChange={(e) => set(index, { protein_g: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" step="any" min={0} placeholder="C" value={item.carbs_g} onChange={(e) => set(index, { carbs_g: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" step="any" min={0} placeholder="F" value={item.fat_g} onChange={(e) => set(index, { fat_g: e.target.value })} />
+          <Input className="sm:col-span-1" type="number" step="any" min={0} placeholder="Fiber" value={item.fiber_g} onChange={(e) => set(index, { fiber_g: e.target.value })} />
           <button
             type="button"
             className="text-ash hover:text-ember sm:col-span-1"
@@ -281,8 +299,6 @@ function MealTemplates({ userId, day }: { userId: string; day: string }) {
   );
 }
 
-const GRAMS_RE = /^\s*([\d.,]+)\s*(?:g|gr|gram)\b\.?\s+(.+)$/i;
-
 function EditMealForm({ userId, meal, onSaved, onCancel }: {
   userId: string;
   meal: Meal;
@@ -378,27 +394,11 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
   };
 
   const loadTemplate = (t: MealTemplate) => {
-    const loaded = t.items.map((it) => {
-      const m = it.description.match(GRAMS_RE);
-      return m ? { name: m[2].trim(), grams: m[1].replace(",", ".") } : { name: it.description, grams: "100" };
-    });
+    const resolved = t.items.map(scaledTemplateItem);
+    const loaded = resolved.map((item) => ({ name: item.name, grams: String(item.grams) }));
     setItems(loaded.length ? loaded : [{ name: "", grams: "100" }]);
     // Templates already carry nutrition values — show them as pre-computed, editable rows.
-    setRows(
-      t.items.map((it) => {
-        const m = it.description.match(GRAMS_RE);
-        return {
-          name: m ? m[2].trim() : it.description,
-          grams: m ? Number(m[1].replace(",", ".")) : 100,
-          kcal: it.kcal,
-          protein_g: it.protein_g ?? null,
-          carbs_g: it.carbs_g ?? null,
-          fat_g: it.fat_g ?? null,
-          fiber_g: it.fiber_g ?? null,
-          source: "template" as const,
-        };
-      })
-    );
+    setRows(resolved);
     setError("");
   };
 
@@ -541,7 +541,7 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
                 type="number"
                 min="1"
                 max="2000"
-                step="1"
+                step="any"
                 value={item.grams}
                 onChange={(e) => patch(i, { grams: e.target.value })}
                 className="w-24!"
@@ -602,7 +602,7 @@ function AddMealCard({ userId, day, onLogged }: { userId: string; day: string; o
                   {(["protein_g", "carbs_g", "fat_g", "fiber_g"] as const).map((key) => (
                     <span key={key} className="flex items-center gap-1">
                       <input
-                        type="number" step="0.1" min="0" title={key} value={r[key] ?? ""}
+                        type="number" step="any" min="0" title={key} value={r[key] ?? ""}
                         onChange={(e) => patchRow(i, { [key]: e.target.value === "" ? null : Number(e.target.value) })}
                         className="w-14 rounded border border-edge bg-night-2 px-1.5 py-0.5 text-right text-xs text-cloud"
                       />

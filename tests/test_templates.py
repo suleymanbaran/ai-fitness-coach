@@ -41,11 +41,11 @@ def test_meal_template_crud_and_scaled_log(fakes):
     assert meal["description"] == "Oat breakfast (x1.5)"
     assert meal["kcal"] == 465  # round(310 * 1.5)
     assert meal["protein_g"] == 45.8  # (6.5+24) * 1.5
-    assert meal["fiber_g"] == 7.5  # 5 * 1.5
+    assert meal["fiber_g"] is None  # whey has no fiber value
     assert meal["source"] == "template"
 
     intake = client.get("/users/u1/intake?days=1").json()
-    assert intake[-1]["kcal"] == 465 and intake[-1]["fiber_g"] == 7.5
+    assert intake[-1]["kcal"] == 465 and intake[-1]["fiber_g"] is None
 
     assert client.delete("/users/u1/meal-templates/Oat%20breakfast").status_code == 204
     assert client.delete("/users/u1/meal-templates/Oat%20breakfast").status_code == 404
@@ -84,9 +84,9 @@ def test_meal_template_tools(fakes):
     assert result == f"logged 'yulaflı kahvaltı' (breakfast) on {tomorrow}: 310 kcal (day total 310 kcal)"
     assert handlers["use_meal_template"]({"name": "yulaflı kahvaltı", "date": "not-a-date"}).startswith("error:")
 
-    # The logged row carries scaled macros incl. fiber
+    # Missing values in any ingredient make that nutrient's total unknown.
     meals = fakes.client.get("/users/u1/meals").json()
-    assert meals[-1]["kcal"] == 620 and meals[-1]["fiber_g"] == 10.0 and meals[-1]["source"] == "template"
+    assert meals[-1]["kcal"] == 620 and meals[-1]["fiber_g"] is None and meals[-1]["source"] == "template"
 
 
 def test_workout_templates_seed_crud_and_tool(fakes):

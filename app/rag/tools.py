@@ -26,6 +26,7 @@ from app.data_access.templates import (
     find_workout_template,
     list_meal_templates,
     list_workout_templates,
+    meal_template_nutrient,
     meal_template_total,
     upsert_meal_template,
 )
@@ -762,16 +763,14 @@ def build_ask_tools(
         except (TypeError, ValueError):
             factor = 1.0
 
-        def scaled(key: str) -> float | None:
-            values = [float(i[key]) * float(i.get("servings", 1)) for i in template.items if i.get(key) is not None]
-            return round(sum(values) * factor, 1) if values else None
-
-        kcal = round(meal_template_total(template.items) * factor)
+        kcal = meal_template_total(template.items, factor)
         description = template.name + (f" (x{factor:g})" if factor != 1 else "")
         add_food_log(
             db, user_id, day, meal=template.meal, description=description, kcal=kcal, source="template",
-            protein_g=scaled("protein_g"), carbs_g=scaled("carbs_g"), fat_g=scaled("fat_g"),
-            fiber_g=scaled("fiber_g"),
+            protein_g=meal_template_nutrient(template.items, "protein_g", factor),
+            carbs_g=meal_template_nutrient(template.items, "carbs_g", factor),
+            fat_g=meal_template_nutrient(template.items, "fat_g", factor),
+            fiber_g=meal_template_nutrient(template.items, "fiber_g", factor),
         )
         total = sync_day_calories(db, user_id, day)
         db.commit()

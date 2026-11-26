@@ -42,7 +42,7 @@ class FoodHit:
 class FoodServing:
     serving_id: str
     description: str
-    calories: int
+    calories: int | None
     carbohydrate_g: float | None
     protein_g: float | None
     fat_g: float | None
@@ -242,7 +242,9 @@ def parse_food_entries(body: dict) -> int | None:
     entries = _as_list((body.get("food_entries") or {}).get("food_entry"))
     if not entries:
         return None
-    return round(sum(float(e.get("calories") or 0) for e in entries))
+    if any(e.get("calories") in (None, "") for e in entries):
+        raise IntegrationError("FatSecret diary entry is missing calories; daily total was not synced")
+    return round(sum(float(e["calories"]) for e in entries))
 
 
 def parse_food_search(body: dict) -> list[FoodHit]:
@@ -272,7 +274,7 @@ def parse_food_detail(body: dict) -> FoodDetail:
             FoodServing(
                 serving_id=str(s.get("serving_id", "")),
                 description=str(s.get("serving_description", "")),
-                calories=round(float(s.get("calories") or 0)),
+                calories=round(float(s["calories"])) if s.get("calories") not in (None, "") else None,
                 carbohydrate_g=_float_or_none(s.get("carbohydrate")),
                 protein_g=_float_or_none(s.get("protein")),
                 fat_g=_float_or_none(s.get("fat")),

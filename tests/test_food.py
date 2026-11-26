@@ -65,6 +65,15 @@ def test_parse_food_detail_reads_servings():
     assert (serving.metric_amount, serving.metric_unit) == (150.0, "g")
 
 
+def test_missing_fatsecret_calories_are_not_treated_as_zero():
+    detail = parse_food_detail({"food": {"servings": {"serving": [
+        {"serving_id": "1", "protein": "20"},
+        {"serving_id": "2", "calories": "0"},
+        {"serving_id": "3", "calories": ""},
+    ]}}})
+    assert [s.calories for s in detail.servings] == [None, 0, None]
+
+
 def test_parse_food_entry_id_shapes():
     assert parse_food_entry_id({"food_entry_id": {"value": "777"}}) == "777"
     assert parse_food_entry_id({"food_entry_id": "777"}) == "777"
