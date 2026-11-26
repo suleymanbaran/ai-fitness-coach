@@ -80,7 +80,10 @@ def test_parse_food_entries():
     entries = {"food_entries": {"food_entry": [{"calories": "540"}, {"calories": "310.6"}]}}
     assert parse_food_entries(entries) == 851
     assert parse_food_entries({"food_entries": {"food_entry": {"calories": "200"}}}) == 200  # single entry
+    assert parse_food_entries({"food_entries": {"food_entry": {"calories": "0"}}}) == 0
     assert parse_food_entries({"food_entries": None}) is None  # nothing logged is not zero eaten
+    with pytest.raises(IntegrationError, match="missing calories"):
+        parse_food_entries({"food_entries": {"food_entry": [{"calories": "200"}, {"protein": "20"}]}})
     with pytest.raises(ReauthRequired):
         parse_food_entries({"error": {"code": 9, "message": "Invalid access token"}})
     with pytest.raises(IntegrationError, match="error 14"):

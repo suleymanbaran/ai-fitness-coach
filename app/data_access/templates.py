@@ -86,8 +86,14 @@ DEFAULT_WORKOUT_TEMPLATES: dict[str, list[dict]] = {
 }
 
 
-def meal_template_total(items: list[dict]) -> int:
-    return round(sum(float(i.get("kcal", 0)) * float(i.get("servings", 1)) for i in items))
+def meal_template_total(items: list[dict], factor: float = 1) -> int:
+    return round(sum(float(i.get("kcal", 0)) * float(i.get("servings", 1)) for i in items) * factor)
+
+
+def meal_template_nutrient(items: list[dict], key: str, factor: float) -> float | None:
+    if not items or any(item.get(key) is None for item in items):
+        return None
+    return round(sum(float(item[key]) * float(item.get("servings", 1)) for item in items) * factor, 1)
 
 
 def _meal_out(row: MealTemplate) -> MealTemplateOut:
