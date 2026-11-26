@@ -9,11 +9,14 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.data_access.food import intake_window
-from app.data_access.users import get_user_days
+from app.data_access.users import UserProfile, get_user_days
 from app.nutrition import PER_100G_RE, MealItemQuery, resolve_items
 from app.main import compute_meal, log_from_meal_template, log_meal, update_meal
 from app.rag.generator import LLMReply, LLMUsage
+from app.rag.prompt import build_prompt
+from app.rag.tools import build_ask_tools
 from app.schemas import LogFromTemplateIn, MealComputeIn, MealIn, MealUpdate
 
 DESC = "Per 100g - Calories: 389kcal | Fat: 7.20g | Carbs: 66.30g | Protein: 16.90g"
@@ -221,6 +224,40 @@ def test_future_manual_and_template_logs_use_selected_day(monkeypatch):
     assert manual.date == templated.date == tomorrow
     assert (manual.kcal, templated.kcal, templated.protein_g) == (300, 200, 10)
     assert refreshed == [tomorrow, tomorrow]
+
+
+def test_coach_tools_log_future_meals_and_templates(monkeypatch):
+    tomorrow = date.today() + timedelta(days=1)
+    entries = []
+
+    def add(_db, _user, day, **values):
+        entries.append((day, values))
+        return SimpleNamespace(fatsecret_entry_id=None)
+
+    def total(_db, _user, day):
+        return sum(values["kcal"] for entry_day, values in entries if entry_day == day)
+
+    template = SimpleNamespace(
+        name="Oats", meal="breakfast", items=[{"description": "Oats", "kcal": 100, "protein_g": 5}],
+    )
+    db = SimpleNamespace(commit=lambda: None)
+    monkeypatch.setattr("app.rag.tools.add_food_log", add)
+    monkeypatch.setattr("app.rag.tools.sync_day_calories", total)
+    monkeypatch.setattr("app.rag.tools.find_meal_template", lambda *_: template)
+    _, handlers = build_ask_tools(db, "u1", Settings(_env_file=None))
+
+    result = handlers["log_meal"]({"date": str(tomorrow), "meal": "lunch", "description": "Rice", "kcal": 300})
+    assert result == f"logged lunch on {tomorrow}: 300 kcal (day total 300 kcal)"
+    result = handlers["use_meal_template"]({"date": str(tomorrow), "name": "Oats", "factor": 2})
+    assert result == f"logged 'Oats (x2)' (breakfast) on {tomorrow}: 200 kcal (day total 500 kcal)"
+    assert [day for day, _ in entries] == [tomorrow, tomorrow]
+    assert handlers["log_meal"]({"date": "invalid", "meal": "lunch", "description": "Rice", "kcal": 300}).startswith("error:")
+
+
+def test_coach_prompt_includes_current_date_without_metrics():
+    user = UserProfile(user_id="u1", name="Test", goal="general_fitness", days=[])
+    prompt = build_prompt("Yarın için öğle yemeği kaydet", user, [], [])
+    assert f"Current server date: {date.today().isoformat()}" in prompt.volatile
 
 
 def test_future_biometrics_do_not_replace_current_profile_day(monkeypatch):

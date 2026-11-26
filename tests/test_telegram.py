@@ -2,7 +2,7 @@
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -407,6 +407,32 @@ def test_photo_rejects_oversized_and_unauthorized():
     other.effective_chat.id = 1
     run(bot.handle_photo(other, SimpleNamespace(args=[])))
     assert "Not authorized" in other_message.replies[0] and api.calls == []
+
+
+@pytest.mark.parametrize("date_arg", ["yarın", "yarin", (TODAY + timedelta(days=1)).isoformat()])
+def test_photo_save_accepts_future_date(date_arg):
+    api = FakeAPI()
+    bot = CoachBot(api, "me", allowed_chat_id=42)
+    photo, _ = photo_update()
+    run(bot.handle_photo(photo, SimpleNamespace(args=[])))
+    save, message = make_update()
+    run(bot.cmd_save(save, SimpleNamespace(args=["ogle", date_arg])))
+    meal = api.calls[-1][1][1]
+    assert meal["date"] == (TODAY + timedelta(days=1)).isoformat()
+    assert meal["date"] in message.replies[0]
+    assert bot.pending_photo is None
+
+
+def test_photo_save_invalid_date_retains_pending_estimate():
+    api = FakeAPI()
+    bot = CoachBot(api, "me", allowed_chat_id=42)
+    photo, _ = photo_update()
+    run(bot.handle_photo(photo, SimpleNamespace(args=[])))
+    save, message = make_update()
+    run(bot.cmd_save(save, SimpleNamespace(args=["ogle", "2026-02-30"])))
+    assert "Geçersiz tarih" in message.replies[0]
+    assert bot.pending_photo is not None
+    assert all(call[0] != "log_meal" for call in api.calls)
 
 
 def test_save_and_fix_without_pending_or_bad_args():

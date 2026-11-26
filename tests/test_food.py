@@ -317,7 +317,10 @@ def test_food_tools_degrade_without_fatsecret(fakes):
 
     assert handlers["log_meal"]({"meal": "dinner", "description": "x"}).startswith("error: kcal is required")
     assert handlers["log_meal"]({"meal": "dinner", "description": "x", "kcal": 99999}).startswith("error: kcal must be")
-    assert handlers["log_meal"]({"meal": "dinner", "description": "x", "kcal": 1, "date": "2099-01-01"}).startswith("error:")
+    tomorrow = TODAY + timedelta(days=1)
+    result = handlers["log_meal"]({"meal": "dinner", "description": "x", "kcal": 1, "date": str(tomorrow)})
+    assert result == f"logged dinner on {tomorrow}: 1 kcal (day total 1 kcal)"
+    assert handlers["log_meal"]({"meal": "dinner", "description": "x", "kcal": 1, "date": "not-a-date"}).startswith("error:")
 
 
 def test_diary_write_failure_never_blocks_the_local_log(fatsecret_env, monkeypatch):
@@ -334,3 +337,17 @@ def test_diary_write_failure_never_blocks_the_local_log(fatsecret_env, monkeypat
     })
     assert "FatSecret diary write failed" in result
     assert "day total 300 kcal" in result
+
+
+def test_future_meal_attempts_fatsecret_write_for_selected_day(fatsecret_env):
+    tomorrow = TODAY + timedelta(days=1)
+    _, handlers = build_ask_tools(
+        fatsecret_env.fakes.db, "u1", Settings(_env_file=None), fatsecret_env.integrations
+    )
+    result = handlers["log_meal"]({
+        "date": str(tomorrow), "meal": "lunch", "description": "Cheeseburger", "kcal": 300,
+        "food_id": "41963", "serving_id": "50321",
+    })
+    assert f"logged lunch on {tomorrow}" in result
+    assert "also written to the FatSecret diary" in result
+    assert int(fatsecret_env.fake.created_entries[-1]["date"]) == (tomorrow - date(1970, 1, 1)).days

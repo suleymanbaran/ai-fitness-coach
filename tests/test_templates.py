@@ -1,7 +1,7 @@
 """Meal & workout templates: API endpoints, LLM tools, scaling, fiber, and prompt injection."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 
 from app.config import Settings, get_settings
 from app.rag.tools import build_ask_tools
@@ -79,7 +79,10 @@ def test_meal_template_tools(fakes):
     result = handlers["use_meal_template"]({"name": "Yulaflı Kahvaltı", "factor": 2})
     assert result == f"logged 'yulaflı kahvaltı (x2)' (breakfast) on {TODAY}: 620 kcal (day total 620 kcal)"
     assert handlers["use_meal_template"]({"name": "yok"}) == "error: no meal template named 'yok'; available: ['yulaflı kahvaltı']"
-    assert handlers["use_meal_template"]({"name": "yulaflı kahvaltı", "date": "2099-01-01"}).startswith("error:")
+    tomorrow = TODAY + timedelta(days=1)
+    result = handlers["use_meal_template"]({"name": "yulaflı kahvaltı", "date": str(tomorrow)})
+    assert result == f"logged 'yulaflı kahvaltı' (breakfast) on {tomorrow}: 310 kcal (day total 310 kcal)"
+    assert handlers["use_meal_template"]({"name": "yulaflı kahvaltı", "date": "not-a-date"}).startswith("error:")
 
     # The logged row carries scaled macros incl. fiber
     meals = fakes.client.get("/users/u1/meals").json()
