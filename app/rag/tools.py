@@ -195,14 +195,15 @@ LOG_MEAL_TOOL = {
     "type": "function",
     "name": "log_meal",
     "description": (
-        "Log something the user ate. Always fill kcal (from search_food/get_food_nutrition when "
+        "Log something the user ate or explicitly wants to log for a future date. Always fill kcal "
+        "(from search_food/get_food_nutrition when "
         "available, otherwise your best estimate — tell the user you estimated). If the food came "
         "from FatSecret, pass food_id and serving_id so the entry is also written to their diary."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "date": {"type": "string", "description": "YYYY-MM-DD, defaults to today"},
+            "date": {"type": "string", "description": "YYYY-MM-DD, including future dates; defaults to today"},
             "meal": {"type": "string", "enum": list(MEALS)},
             "description": {"type": "string", "description": "what was eaten, with portions, e.g. '2 eggs + 1 simit'"},
             "kcal": {"type": "integer"},
@@ -660,8 +661,6 @@ def build_ask_tools(
             day = date.fromisoformat(day_str)
         except ValueError:
             return f"error: invalid date {day_str!r}, expected YYYY-MM-DD"
-        if day > date.today():
-            return "error: cannot log a meal for a future date"
         try:
             kcal = int(round(float(args["kcal"])))
         except (KeyError, TypeError, ValueError):
@@ -758,8 +757,6 @@ def build_ask_tools(
             day = date.fromisoformat(day_str)
         except ValueError:
             return f"error: invalid date {day_str!r}, expected YYYY-MM-DD"
-        if day > date.today():
-            return "error: cannot log a meal for a future date"
         try:
             factor = min(max(float(args.get("factor") or 1.0), 0.25), 10.0)
         except (TypeError, ValueError):

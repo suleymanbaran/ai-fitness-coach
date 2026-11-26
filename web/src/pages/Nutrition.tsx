@@ -732,7 +732,7 @@ export default function Nutrition({ userId }: { userId: string }) {
                     className="w-auto!"
                     aria-label="Selected nutrition day"
                   />
-                  <Button type="button" variant="ghost" className="px-2" onClick={() => changeDay(1)} disabled={day >= todayISO()} aria-label="Next day">
+                  <Button type="button" variant="ghost" className="px-2" onClick={() => changeDay(1)} aria-label="Next day">
                     <ChevronRight className="h-4 w-4" />
                   </Button>
                 </div>

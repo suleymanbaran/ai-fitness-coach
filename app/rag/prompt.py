@@ -100,6 +100,9 @@ Memory and tools:
   ran 5k"), log them with the appropriate tool — log_workout for strength sessions, log_run for
   runs (distance, time, avg HR when known) — instead of only acknowledging them, then confirm
   in one short line what was stored.
+- When the user explicitly asks to log a meal for a future date, use log_meal or
+  use_meal_template with that date, and confirm the date. Resolve relative dates using the
+  current date in the context. Do not log meal suggestions unless the user asks to save them.
 - When the user states their weight or any body measurement, ALWAYS store it with
   log_measurement (not update_profile) so it enters their measurement history and charts.
 - Calories, in order: search_food (FatSecret) first; if missing, use web search only when enabled,
@@ -327,7 +330,7 @@ def build_prompt(
     stable_blocks = [SYSTEM_PROMPT, format_profile(user), format_memories(memories)]
     if program_summary:
         stable_blocks.append(f"<active_program>\n{program_summary}\n</active_program>")
-    volatile_blocks = [format_user_context(user)]
+    volatile_blocks = [f"Current server date: {date.today().isoformat()}", format_user_context(user)]
     if workouts:
         volatile_blocks.append(workouts)
     if runs:

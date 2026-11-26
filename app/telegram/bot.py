@@ -12,6 +12,7 @@ Design notes:
 import asyncio
 import html
 from collections.abc import Callable
+from datetime import date, timedelta
 
 from telegram import Update
 from telegram.constants import ChatAction, ParseMode
@@ -121,7 +122,7 @@ class CoachBot:
             "Just write or speak your mind — I log metrics, meals and workouts from plain text "
             "(\"slept 7h, HRV 55\", \"2 eggs + simit for breakfast\", \"benched 80x5x3\").\n\n"
             "Commands:\n"
-            "Yemek fotoğrafı gönder: bileşenleri ve porsiyonları tahmin ederim; /fix ile düzeltip /save ile kaydedersin.\n"
+            "Yemek fotoğrafı gönder: /fix ile düzeltip /save ogle [YYYY-MM-DD] ile kaydedersin.\n"
             "/today — latest metrics, intake and how the day compares to baseline\n"
             "/meals — today's food log\n"
             "/workout — today's planned session\n"
@@ -164,7 +165,8 @@ class CoachBot:
             text += f"\n\nBelirsizlik: {pending['uncertainty']}"
         text += (
             "\n\nHenüz kaydedilmedi. Gram düzeltmek için /fix <no> <gram> (0 = çıkar), "
-            "kaydetmek için /save kahvalti|ogle|aksam|atistirma, vazgeçmek için /discard."
+            "kaydetmek için /save kahvalti|ogle|aksam|atistirma [YYYY-MM-DD veya yarın], "
+            "vazgeçmek için /discard."
         )
         return text
 
@@ -233,10 +235,23 @@ class CoachBot:
             await self._reply(update, escape_html("Kaydedilecek bekleyen bir fotoğraf tahmini yok."))
             return
         args = list(context.args or [])
-        meal = MEAL_ALIASES.get(args[0].lower()) if len(args) == 1 else None
+        meal = MEAL_ALIASES.get(args[0].lower()) if 1 <= len(args) <= 2 else None
         if meal is None:
-            await self._reply(update, escape_html("Öğünü seç: /save kahvalti, ogle, aksam veya atistirma."))
+            await self._reply(update, escape_html("Öğünü seç: /save kahvalti, ogle, aksam veya atistirma [YYYY-MM-DD]."))
             return
+        day = None
+        if len(args) == 2:
+            try:
+                day = (
+                    date.today() + timedelta(days=1)
+                    if args[1].lower() in ("yarın", "yarin")
+                    else date.fromisoformat(args[1])
+                )
+                if args[1].lower() not in ("yarın", "yarin") and day.isoformat() != args[1]:
+                    raise ValueError
+            except ValueError:
+                await self._reply(update, escape_html("Geçersiz tarih. Örnek: /save ogle 2026-12-01 veya /save ogle yarın."))
+                return
         items = pending["items"]
         payload = {
             "meal": meal,
@@ -246,10 +261,13 @@ class CoachBot:
         for key in MACROS:  # a missing value is never stored as zero
             values = [it[key] for it in items]
             payload[key] = round(sum(values), 1) if all(v is not None for v in values) else None
+        if day is not None:
+            payload["date"] = day.isoformat()
         if await self._call(update, self.api.log_meal, self.user_id, **payload) is None:
             return  # keep the estimate so the user can retry
         self.pending_photo = None
-        await self._reply(update, escape_html(f"Kaydedildi: ~{payload['kcal']} kcal ({meal}). Tahmindir, kesin ölçüm değildir."))
+        saved_date = f", {day.isoformat()}" if day is not None else ""
+        await self._reply(update, escape_html(f"Kaydedildi: ~{payload['kcal']} kcal ({meal}{saved_date}). Tahmindir, kesin ölçüm değildir."))
 
     async def cmd_discard(self, update: Update, context) -> None:
         if not await self._authorized(update):

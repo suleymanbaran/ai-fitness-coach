@@ -56,7 +56,7 @@ Anyone can ask the coach questions and log days without connecting Google Health
   load into the same editable rows. Missing nutrients remain unknown rather than zero. Select a past
   or future date in Nutrition to log a local meal or template for that day; future entries are not
   included in today's intake or recent profile metrics. Web-logged meals are not written to the
-  FatSecret diary, and the coach's meal tools still reject future dates.
+  FatSecret diary. In chat, ask the coach to log a meal or template for a future date.
 - **Food photo estimates (React Nutrition page):** choose a JPEG, PNG or WebP (up to 5 MiB and
   20 million pixels) and explicitly select **Analyze photo**. Review the estimated foods, grams,
   calories and macros before **Log meal**; changing a food or portion requires recomputing and
@@ -69,7 +69,8 @@ Anyone can ask the coach questions and log days without connecting Google Health
 - **Food photos in Telegram:** send a photo to the bot (Telegram-compressed JPEG, up to 5 MB). It
   uses the same endpoint, limits and low-detail vision call as the web page and replies with the
   estimated foods, grams and kcal plus the model's uncertainty note. Nothing is saved until you
-  run `/save kahvalti|ogle|aksam|atistirma`; `/fix <no> <gram>` linearly rescales one item
+  run `/save kahvalti|ogle|aksam|atistirma` (optionally followed by `YYYY-MM-DD` or `yarın`);
+  `/fix <no> <gram>` linearly rescales one item
   (`0` removes it) and `/discard` drops the estimate. The pending estimate is kept in the bot's
   memory only (lost on restart) and the image is never stored. Unknown macros are saved as unknown.
 - **Programs:** discuss constraints with the coach, then use the React Plan page to explicitly
