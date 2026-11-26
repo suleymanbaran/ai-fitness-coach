@@ -406,8 +406,6 @@ def log_meal(
     if db.get(User, user_id) is None:
         raise HTTPException(status_code=404, detail=f"User {user_id} not found")
     day = meal.day or date.today()
-    if day > date.today():
-        raise HTTPException(status_code=422, detail="Cannot log a meal for a future date")
     row = add_food_log(
         db, user_id, day, meal=meal.meal, description=meal.description, kcal=meal.kcal,
         source="manual", fatsecret_food_id=meal.fatsecret_food_id, servings=meal.servings,
@@ -667,8 +665,6 @@ def log_from_meal_template(
     if template is None:
         raise HTTPException(status_code=404, detail=f"No meal template named {name!r}")
     day = body.day or date.today()
-    if day > date.today():
-        raise HTTPException(status_code=422, detail="Cannot log a meal for a future date")
 
     factor = body.factor
     description = template.name + (f" (x{factor:g})" if factor != 1 else "")

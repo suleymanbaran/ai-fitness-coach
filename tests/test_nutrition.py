@@ -6,11 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session
 
+from app.data_access.food import intake_window
+from app.data_access.users import get_user_days
 from app.nutrition import PER_100G_RE, MealItemQuery, resolve_items
-from app.main import compute_meal, update_meal
+from app.main import compute_meal, log_from_meal_template, log_meal, update_meal
 from app.rag.generator import LLMReply, LLMUsage
-from app.schemas import MealComputeIn, MealUpdate
+from app.schemas import LogFromTemplateIn, MealComputeIn, MealIn, MealUpdate
 
 DESC = "Per 100g - Calories: 389kcal | Fat: 7.20g | Carbs: 66.30g | Protein: 16.90g"
 
@@ -179,3 +183,98 @@ def test_update_meal_refreshes_totals_and_rejects_external_diary_entries(monkeyp
         )
     assert exc.value.status_code == 409
     assert row.description == "Chicken and rice"
+
+
+def test_future_manual_and_template_logs_use_selected_day(monkeypatch):
+    tomorrow = date.today() + timedelta(days=1)
+    entries = []
+    refreshed = []
+
+    def add(_db, _user, day, **values):
+        defaults = {
+            "id": len(entries) + 1, "date": day, "fatsecret_food_id": None,
+            "fatsecret_entry_id": None, "servings": 1, "protein_g": None, "carbs_g": None,
+            "fat_g": None, "fiber_g": None,
+        }
+        row = SimpleNamespace(**(defaults | values))
+        entries.append(row)
+        return row
+
+    template = SimpleNamespace(
+        name="Oats", meal="breakfast",
+        items=[{"description": "Oats", "kcal": 100, "protein_g": 5}],
+    )
+    db = SimpleNamespace(get=lambda *_: object(), commit=lambda: None)
+    monkeypatch.setattr("app.main.authorize", lambda *_: None)
+    monkeypatch.setattr("app.main.add_food_log", add)
+    monkeypatch.setattr("app.main.find_meal_template", lambda *_: template)
+    monkeypatch.setattr("app.main.sync_day_calories", lambda _db, _user, day: refreshed.append(day))
+
+    manual = log_meal(
+        MealIn(date=tomorrow, meal="lunch", description="Lunch", kcal=300),
+        user_id="u1", db=db, current=None,
+    )
+    templated = log_from_meal_template(
+        "Oats", LogFromTemplateIn(date=tomorrow, factor=2),
+        user_id="u1", db=db, current=None,
+    )
+    assert manual.date == templated.date == tomorrow
+    assert (manual.kcal, templated.kcal, templated.protein_g) == (300, 200, 10)
+    assert refreshed == [tomorrow, tomorrow]
+
+
+def test_future_biometrics_do_not_replace_current_profile_day(monkeypatch):
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    engine = create_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE daily_biometrics (
+                user_id TEXT, date DATE, hrv_ms FLOAT, sleep_score INTEGER,
+                sleep_minutes INTEGER, resting_hr_bpm INTEGER, calories_kcal INTEGER,
+                steps INTEGER, active_kcal INTEGER, total_kcal INTEGER, sleep_stages JSON
+            )
+        """))
+        conn.execute(text(
+            "INSERT INTO daily_biometrics (user_id, date, hrv_ms, calories_kcal) "
+            "VALUES ('u1', :day, :hrv, :kcal)"
+        ), [
+            {"day": today.isoformat(), "hrv": 55, "kcal": 200},
+            {"day": tomorrow.isoformat(), "hrv": None, "kcal": 500},
+        ])
+    with Session(engine) as db:
+        assert [(d.date, d.hrv_ms, d.calories_kcal) for d in get_user_days(db, "u1")] == [(today, 55, 200)]
+
+        class Tomorrow(date):
+            @classmethod
+            def today(cls):
+                return tomorrow
+
+        monkeypatch.setattr("app.data_access.users.date", Tomorrow)
+        assert [d.date for d in get_user_days(db, "u1")] == [today, tomorrow]
+
+
+def test_future_meals_stay_out_of_recent_intake_until_their_day(monkeypatch):
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    engine = create_engine("sqlite://")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE food_logs (
+                user_id TEXT, date DATE, kcal INTEGER, protein_g FLOAT,
+                carbs_g FLOAT, fat_g FLOAT, fiber_g FLOAT
+            )
+        """))
+        conn.execute(text(
+            "INSERT INTO food_logs (user_id, date, kcal) VALUES ('u1', :day, :kcal)"
+        ), [{"day": today.isoformat(), "kcal": 200}, {"day": tomorrow.isoformat(), "kcal": 500}])
+    with Session(engine) as db:
+        assert [(d.date, d.kcal) for d in intake_window(db, "u1", 1)] == [(today, 200)]
+
+        class Tomorrow(date):
+            @classmethod
+            def today(cls):
+                return tomorrow
+
+        monkeypatch.setattr("app.data_access.food.date", Tomorrow)
+        assert [(d.date, d.kcal) for d in intake_window(db, "u1", 1)] == [(tomorrow, 500)]
