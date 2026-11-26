@@ -63,7 +63,7 @@ def get_user_days(db: Session, user_id: str, limit: int = HISTORY_DAYS) -> list[
             _rolling_avg(DailyBiometrics.resting_hr_bpm).label("resting_hr_baseline_bpm"),
             func.count().over(order_by=DailyBiometrics.date, rows=(-BASELINE_DAYS, -1)).label("baseline_days"),
         )
-        .where(DailyBiometrics.user_id == user_id)
+        .where(DailyBiometrics.user_id == user_id, DailyBiometrics.date <= date.today())
         .order_by(DailyBiometrics.date)
     )
     rows = db.execute(stmt).mappings().all()

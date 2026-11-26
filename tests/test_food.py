@@ -1,7 +1,7 @@
 """FatSecret food search/detail/diary-write, the meals endpoints and the food tool handlers."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import httpx
@@ -128,9 +128,42 @@ def test_meal_endpoints_log_and_total_the_day(fakes):
     assert fakes.client.delete(f"/users/u1/meals/{meal_id}").status_code == 404
 
     assert fakes.client.post("/users/u1/meals", json={"meal": "dinner", "description": "x", "kcal": 100, "date": str(date(2020, 1, 1))}).status_code == 200
-    future = fakes.client.post("/users/u1/meals", json={"meal": "dinner", "description": "x", "kcal": 100, "date": "2099-01-01"})
-    assert future.status_code == 422
     assert fakes.client.post("/users/nobody/meals", json={"meal": "dinner", "description": "x", "kcal": 100}).status_code == 404
+
+
+def test_future_meals_and_templates_do_not_change_today(fakes):
+    client = fakes.client
+    tomorrow = TODAY + timedelta(days=1)
+    today_meal = client.post("/users/u1/meals", json={
+        "date": str(TODAY), "meal": "breakfast", "description": "Today", "kcal": 200,
+    })
+    assert today_meal.status_code == 200
+    today_profile = client.get("/users/u1").json()["days"]
+    today_intake = client.get("/users/u1/intake?days=1").json()
+
+    template = {"name": "Oats", "meal": "breakfast", "items": [
+        {"description": "Oats", "kcal": 100, "servings": 1, "protein_g": 5},
+    ]}
+    assert client.put("/users/u1/meal-templates", json=template).status_code == 200
+    manual = client.post("/users/u1/meals", json={
+        "date": str(tomorrow), "meal": "lunch", "description": "Tomorrow", "kcal": 300,
+    })
+    templated = client.post("/users/u1/meal-templates/Oats/log", json={"date": str(tomorrow), "factor": 2})
+    assert manual.status_code == templated.status_code == 200
+    assert manual.json()["date"] == templated.json()["date"] == str(tomorrow)
+    assert [row["kcal"] for row in client.get(f"/users/u1/meals?day={tomorrow}").json()] == [300, 200]
+    assert fakes.db.query(DailyBiometrics).filter_by(user_id="u1", date=tomorrow).one().calories_kcal == 500
+    assert client.get("/users/u1/intake?days=1").json() == today_intake
+    assert client.get("/users/u1").json()["days"] == today_profile
+
+    meal_id = manual.json()["id"]
+    assert client.put(f"/users/u1/meals/{meal_id}", json={
+        "meal": "dinner", "description": "Updated", "kcal": 400,
+    }).status_code == 200
+    assert fakes.db.query(DailyBiometrics).filter_by(user_id="u1", date=tomorrow).one().calories_kcal == 600
+    assert client.delete(f"/users/u1/meals/{meal_id}").status_code == 204
+    assert fakes.db.query(DailyBiometrics).filter_by(user_id="u1", date=tomorrow).one().calories_kcal == 200
+    assert client.get("/users/u1/intake?days=1").json() == today_intake
 
 
 def test_meal_update_preserves_day_and_refreshes_daily_totals(fakes):

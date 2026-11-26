@@ -53,7 +53,10 @@ Anyone can ask the coach questions and log days without connecting Google Health
   per template and per day alongside protein/carbs/fat. The web **Add meal** form only asks for
   food **names + grams** — kcal/macros are resolved in one batched LLM estimate
   (`POST /users/{id}/meals/compute`), and saved templates
-  load into the same editable rows. Missing nutrients remain unknown rather than zero.
+  load into the same editable rows. Missing nutrients remain unknown rather than zero. Select a past
+  or future date in Nutrition to log a local meal or template for that day; future entries are not
+  included in today's intake or recent profile metrics. Web-logged meals are not written to the
+  FatSecret diary, and the coach's meal tools still reject future dates.
 - **Food photo estimates (React Nutrition page):** choose a JPEG, PNG or WebP (up to 5 MiB and
   20 million pixels) and explicitly select **Analyze photo**. Review the estimated foods, grams,
   calories and macros before **Log meal**; changing a food or portion requires recomputing and

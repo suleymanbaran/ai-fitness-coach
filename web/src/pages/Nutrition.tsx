@@ -184,7 +184,6 @@ function MealTemplates({ userId, day }: { userId: string; day: string }) {
   const [message, setMessage] = useState("");
 
   const log = async (template: MealTemplate) => {
-    if (day > todayISO()) return;
     const factor = Number(factors[template.id] || "1") || 1;
     setMessage("");
     try {
@@ -206,11 +205,6 @@ function MealTemplates({ userId, day }: { userId: string; day: string }) {
       }
     >
       {message && <p className="mb-3 text-sm text-lime">{message}</p>}
-      {day > todayISO() && (
-        <p className="mb-3 text-xs text-ash">
-          New meals cannot be logged for future dates. Existing local meals can be edited; manage FatSecret-linked entries there.
-        </p>
-      )}
       {templates.loading ? (
         <Spinner label="" />
       ) : !templates.data?.length ? (
@@ -239,7 +233,7 @@ function MealTemplates({ userId, day }: { userId: string; day: string }) {
                     onChange={(e) => setFactors({ ...factors, [template.id]: e.target.value })}
                     title="Portion factor"
                   />
-                  <Button variant="primary" onClick={() => log(template)} disabled={day > todayISO()}>
+                  <Button variant="primary" onClick={() => log(template)}>
                     Log
                   </Button>
                   <Button variant="ghost" onClick={() => setEditing(editing === template.id ? null : template.id)}>
@@ -799,20 +793,14 @@ export default function Nutrition({ userId }: { userId: string }) {
             )}
           </Card>
 
-          {day > todayISO() ? (
-            <Card title="Add meal">
-              <Empty>New meals cannot be logged for future dates. Existing local meals can still be edited.</Empty>
-            </Card>
-          ) : (
-            <AddMealCard
-              userId={userId}
-              day={day}
-              onLogged={() => {
-                meals.reload();
-                intake.reload();
-              }}
-            />
-          )}
+          <AddMealCard
+            userId={userId}
+            day={day}
+            onLogged={() => {
+              meals.reload();
+              intake.reload();
+            }}
+          />
 
           <MealTemplates userId={userId} day={day} />
         </div>
